@@ -19,6 +19,9 @@ import (
 	"tailscale.com/types/views"
 )
 
+// serviceNamePrefix starts every service name, `svc:<label>`.
+const serviceNamePrefix = "svc:"
+
 // serviceVIPMap maps a service to its virtual IP addresses (VIPs).
 type serviceVIPMap map[tailcfg.ServiceName][]netip.Addr
 
@@ -377,7 +380,7 @@ func (s *State) withServiceRecords(records []claimRecord, nodes views.Slice[type
 
 	for _, r := range records {
 		label, _, _ := strings.Cut(r.record.Name, ".")
-		svc := tailcfg.AsServiceName(label)
+		svc := tailcfg.AsServiceName(serviceNamePrefix + label)
 
 		if idx != nil && slices.Contains(idx.hosts[svc], r.nodeID) {
 			addVIPRecords(r.record.Name, svc)

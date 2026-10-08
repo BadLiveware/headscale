@@ -261,3 +261,60 @@ func sorted(addrs []netip.Addr) []netip.Addr {
 
 	return out
 }
+
+// TestServiceVIPsForClaimedNames checks that a hostnameClaims name of a
+// service with VIPs answers with the VIPs once an approved host claims it,
+// and that a service keeps its VIPs when the policy drops and restores it.
+func TestServiceVIPsForClaimedNames(t *testing.T) {
+	t.Parallel()
+
+	const claimed = "cca.gw.example.com"
+
+	pol := `{
+		"tagOwners": {"tag:gw-cca": ["svc-user@"]},
+		"autoApprovers": {"services": {"svc:cca": ["tag:gw-cca"]}},
+		"hostnameClaims": {"*.gw.example.com": ["tag:gw-cca"]},
+		"grants": [{"src": ["*"], "dst": ["*"], "ip": ["*"]}]
+	}`
+
+	srv := servertest.NewServer(t, servertest.WithMagicDNS("headscale.net"))
+	user := srv.CreateUser(t, "svc-user")
+	reloadPolicy(t, srv, pol)
+
+	vips := srv.State().ServiceVIPs(serviceName)
+	require.Len(t, vips, 2)
+
+	gw := servertest.NewClient(t, srv, "gw", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
+	viewer := servertest.NewClient(t, srv, "viewer", servertest.WithUser(user))
+
+	viewer.WaitForPeers(t, 1, 10*time.Second)
+
+	gw.AdvertiseServices(t, serviceName)
+
+	require.Eventually(t, func() bool {
+		return len(srv.State().ServiceHosts(serviceName)) == 1
+	}, serviceWait, 50*time.Millisecond, "gw becomes an active host")
+
+	viewer.WaitForCondition(t, "the claimed name answers with the VIPs", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return slices.Equal(claimedAddrs(nm, claimed), sorted(vips)) })
+
+	viewer.WaitForCondition(t, "the viewer carries the VIPs on gw", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw" })
+
+	reloadPolicy(t, srv, `{
+		"tagOwners": {"tag:gw-cca": ["svc-user@"]},
+		"grants": [{"src": ["*"], "dst": ["*"], "ip": ["*"]}]
+	}`)
+
+	viewer.WaitForCondition(t, "a dropped service loses its route and name", serviceWait,
+		func(nm *netmap.NetworkMap) bool {
+			return len(vipCarriers(nm, vips)) == 0 && len(serviceRecords(nm)) == 0
+		})
+
+	reloadPolicy(t, srv, pol)
+
+	require.Equal(t, vips, srv.State().ServiceVIPs(serviceName), "a restored service gets its old VIPs")
+
+	viewer.WaitForCondition(t, "the restored service is reachable again", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw" })
+}
