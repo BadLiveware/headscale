@@ -3,10 +3,12 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	policyv2 "github.com/juanfont/headscale/hscontrol/policy/v2"
 	"github.com/juanfont/headscale/integration/hsic"
 	"github.com/juanfont/headscale/integration/integrationutil"
 	"github.com/juanfont/headscale/integration/tsic"
@@ -221,4 +223,165 @@ func TestResolveMagicDNSExtraRecordsPath(t *testing.T) {
 	for _, client := range allClients {
 		assertCommandOutputContains(t, client, []string{"dig", "copy.myvpn.example.com"}, "8.8.8.8")
 	}
+}
+
+// TestNodeClaimedHostnames checks that tagged nodes can claim a hostname by
+// advertising a service (`tailscale serve advertise`), that other nodes
+// resolve the name to every online node that claims it, and that a node is
+// removed when it drains (`tailscale serve drain`) or goes offline. A node
+// whose tag the policy does not authorise cannot claim the name.
+func TestNodeClaimedHostnames(t *testing.T) {
+	IntegrationSkip(t)
+
+	const (
+		gatewayUser = "gateway"
+		rogueUser   = "rogue"
+		clientUser  = "client"
+		service     = "svc:cca"
+		claimedName = "cca.gw.example.com"
+	)
+
+	spec := ScenarioSpec{Users: []string{gatewayUser, rogueUser, clientUser}}
+
+	scenario, err := NewScenario(spec)
+	require.NoError(t, err)
+
+	defer scenario.ShutdownAssertNoPanics(t)
+
+	policy := &policyv2.Policy{
+		TagOwners: policyv2.TagOwners{
+			"tag:gateway": policyv2.Owners{usernameOwner(gatewayUser + "@")},
+			"tag:rogue":   policyv2.Owners{usernameOwner(rogueUser + "@")},
+		},
+		ACLs: []policyv2.ACL{
+			{
+				Action:  "accept",
+				Sources: []policyv2.Alias{wildcard()},
+				Destinations: []policyv2.AliasWithPorts{
+					aliasWithPorts(wildcard(), tailcfg.PortRangeAny),
+				},
+			},
+		},
+		HostnameClaims: policyv2.HostnameClaims{
+			"*.gw.example.com": {"tag:gateway"},
+		},
+	}
+
+	headscale, err := scenario.Headscale(
+		hsic.WithACLPolicy(policy),
+		hsic.WithTestName("claimedhosts"),
+		hsic.WithConfigEnv(map[string]string{
+			// Disable global nameservers to make the test run offline.
+			"HEADSCALE_DNS_NAMESERVERS_GLOBAL": "",
+		}),
+	)
+	requireNoErrHeadscaleEnv(t, err)
+
+	nodesPerUser := []struct {
+		user  string
+		count int
+		tags  []string
+	}{
+		{user: gatewayUser, count: 2, tags: []string{"tag:gateway"}},
+		{user: rogueUser, count: 1, tags: []string{"tag:rogue"}},
+		{user: clientUser, count: 1},
+	}
+
+	for _, n := range nodesPerUser {
+		u, err := scenario.CreateUser(n.user)
+		require.NoError(t, err)
+
+		err = scenario.CreateTailscaleNodesInUser(n.user, tsic.VersionHead, n.count,
+			tsic.WithNetwork(scenario.Networks()[0]),
+			tsic.WithPackages("bind-tools"),
+		)
+		require.NoError(t, err)
+
+		key, err := scenario.CreatePreAuthKey(mustParseID(u.Id), true, false)
+		if len(n.tags) > 0 {
+			key, err = scenario.CreatePreAuthKeyWithTags(mustParseID(u.Id), true, false, n.tags)
+		}
+
+		require.NoError(t, err)
+
+		err = scenario.RunTailscaleUp(n.user, headscale.GetEndpoint(), key.Key)
+		require.NoError(t, err)
+	}
+
+	err = scenario.WaitForTailscaleSync()
+	requireNoErrSync(t, err)
+
+	gateways, err := scenario.ListTailscaleClients(gatewayUser)
+	requireNoErrListClients(t, err)
+
+	rogues, err := scenario.ListTailscaleClients(rogueUser)
+	requireNoErrListClients(t, err)
+
+	clients, err := scenario.ListTailscaleClients(clientUser)
+	requireNoErrListClients(t, err)
+
+	client := clients[0]
+
+	for _, node := range append(slices.Clone(gateways), rogues...) {
+		_, _, err := node.Execute([]string{"tailscale", "serve", "advertise", service})
+		require.NoErrorf(t, err, "%s advertising %s", node.Hostname(), service)
+	}
+
+	addrsOf := func(nodes ...TailscaleClient) []string {
+		var addrs []string
+
+		for _, node := range nodes {
+			ips, err := node.IPs()
+			require.NoError(t, err)
+
+			for _, ip := range ips {
+				addrs = append(addrs, ip.String())
+			}
+		}
+
+		return addrs
+	}
+
+	// requireResolves waits until the client resolves the claimed name, A
+	// and AAAA, to exactly want, and returns how long that took.
+	requireResolves := func(want []string, timeout time.Duration, msg string) time.Duration {
+		t.Helper()
+
+		start := time.Now()
+
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			stdout, _, err := client.Execute([]string{
+				"dig", "+short", claimedName, "A", claimedName, "AAAA",
+			})
+			assert.NoError(c, err)
+			assert.ElementsMatch(c, want, strings.Fields(stdout))
+		}, timeout, 500*time.Millisecond, msg)
+
+		return time.Since(start)
+	}
+
+	requireResolves(addrsOf(gateways...), integrationutil.ScaledTimeout(30*time.Second),
+		"client resolves the claimed name to both gateways and not to the rogue node")
+
+	_, _, err = gateways[0].Execute([]string{"tailscale", "serve", "drain", service})
+	require.NoError(t, err)
+
+	took := requireResolves(addrsOf(gateways[1]), integrationutil.ScaledTimeout(10*time.Second),
+		"client stops resolving the claimed name to the drained gateway")
+	t.Logf("drained gateway left the answers after %s", took)
+
+	_, _, err = gateways[0].Execute([]string{"tailscale", "serve", "advertise", service})
+	require.NoError(t, err)
+
+	requireResolves(addrsOf(gateways...), integrationutil.ScaledTimeout(10*time.Second),
+		"client resolves the claimed name to both gateways again")
+
+	err = gateways[1].Down()
+	require.NoError(t, err)
+
+	// Headscale waits up to 10 s for a reconnect before it marks a node
+	// offline.
+	took = requireResolves(addrsOf(gateways[0]), integrationutil.ScaledTimeout(30*time.Second),
+		"client stops resolving the claimed name to the offline gateway")
+	t.Logf("offline gateway left the answers after %s", took)
 }
