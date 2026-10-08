@@ -103,6 +103,10 @@ type Headscale struct {
 	authProvider   AuthProvider
 	mapBatcher     *mapper.Batcher
 
+	// servicesFetcher fetches the services nodes advertise, which back
+	// node-claimed hostnames.
+	servicesFetcher *servicesFetcher
+
 	clientStreamsOpen sync.WaitGroup
 }
 
@@ -181,6 +185,7 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 		log.Debug().Caller().EmbedObject(node).Msg("ephemeral node deleted because garbage collection timeout reached")
 	})
 	app.ephemeralGC = ephemeralGC
+	app.servicesFetcher = newServicesFetcher(&app)
 
 	var authProvider AuthProvider
 
