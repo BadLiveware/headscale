@@ -112,8 +112,11 @@ hostname and port combination "http://hostname-in-magic-dns.myvpn.example.com:30
 
 ## Node-claimed hostnames
 
-A tagged node can claim a hostname, and Headscale answers that hostname with the addresses of every online node that claims it.
+A tagged node can claim a hostname, and Headscale publishes that hostname with the addresses of every online node that
+claims it.
 Use it to give one stable name to a service that runs on several nodes, for example the replicas of a load balancer.
+The Tailscale client answers a name with one IPv4 and one IPv6 address, so Headscale orders the addresses for each client:
+each client keeps resolving to the same node while that node claims the name, and the clients spread evenly over the nodes.
 The records reach clients through the network map, and the Tailscale client answers them locally with
 [MagicDNS](https://tailscale.com/docs/features/magicdns), like [extra DNS records](#setting-extra-dns-records).
 Headscale does not need a restart when a claim changes.
