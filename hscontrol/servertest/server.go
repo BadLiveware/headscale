@@ -49,6 +49,7 @@ type serverConfig struct {
 	realListener     bool
 	magicDNSDomain   string
 	dnsResolvers     []string
+	noise            types.NoiseConfig
 }
 
 func defaultServerConfig() *serverConfig {
@@ -117,6 +118,16 @@ func WithDNSResolvers(addrs ...string) ServerOption {
 	return func(c *serverConfig) { c.dnsResolvers = addrs }
 }
 
+// WithNoisePing enables the HTTP/2 PING health check on Noise connections:
+// a PING after idle without reading from the node, and a closed
+// connection when no answer comes within timeout. Off by default, so
+// other tests see no extra frames.
+func WithNoisePing(idle, timeout time.Duration) ServerOption {
+	return func(c *serverConfig) {
+		c.noise = types.NoiseConfig{PingAfterIdle: idle, PingTimeout: timeout}
+	}
+}
+
 // WithLogTailEnabled sets logtail.enabled, so the server leaves client log
 // uploads alone instead of telling clients to disable them.
 func WithLogTailEnabled() ServerOption {
@@ -152,6 +163,7 @@ func NewServer(tb testing.TB, opts ...ServerOption) *TestServer {
 		PrefixV4:     &prefixV4,
 		PrefixV6:     &prefixV6,
 		IPAllocation: types.IPAllocationStrategySequential,
+		Noise:        sc.noise,
 		Database: types.DatabaseConfig{
 			Type: "sqlite3",
 			Sqlite: types.SqliteConfig{
