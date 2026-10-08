@@ -100,6 +100,11 @@ type PolicyManager struct {
 	// nodeAttrsPending mirrors len(nodeAttrsChanged) > 0 so the drain,
 	// called on every dispatched change, skips pm.mu when idle.
 	nodeAttrsPending atomic.Bool
+
+	// serviceVIPs are the virtual IP addresses of services, set by the
+	// server with [PolicyManager.SetServiceVIPs]. They survive policy
+	// reloads: the server owns them, not the policy file.
+	serviceVIPs map[tailcfg.ServiceName][]netip.Addr
 }
 
 // filterAndPolicy combines the compiled filter rules with policy content for hashing.
@@ -246,6 +251,10 @@ func NewPolicyManager(b []byte, users []types.User, nodes views.Slice[types.Node
 // pm is written, so a caller that restores its own input on error leaves pm
 // as it was, and a retry with the same input recompiles.
 func (pm *PolicyManager) updateLocked() (bool, error) {
+	if pm.pol != nil {
+		pm.pol.serviceVIPs = pm.serviceVIPs
+	}
+
 	// Compile all grants once. Both global and per-node filter
 	// rules are derived from these compiled grants.
 	grants := pm.pol.compileGrants(pm.users, pm.nodes)
@@ -275,6 +284,7 @@ func (pm *PolicyManager) updateLocked() (bool, error) {
 	refreshNodeAttrs := pm.pol == nil ||
 		len(pm.pol.NodeAttrs) > 0 ||
 		pm.pol.RandomizeClientPort ||
+		len(pm.serviceVIPs) > 0 ||
 		len(pm.nodeAttrsHashes) > 0
 
 	var nodeAttrs map[types.NodeID]tailcfg.NodeCapMap
@@ -282,6 +292,11 @@ func (pm *PolicyManager) updateLocked() (bool, error) {
 		nodeAttrs, err = pm.pol.compileNodeAttrs(pm.users, pm.nodes)
 		if err != nil {
 			return false, fmt.Errorf("compiling nodeAttrs: %w", err)
+		}
+
+		err = pm.pol.addServiceHostCaps(nodeAttrs, pm.nodes)
+		if err != nil {
+			return false, err
 		}
 	}
 
@@ -703,14 +718,22 @@ func (pm *PolicyManager) BuildPeerMap(nodes views.Slice[types.NodeView]) map[typ
 
 	// Precompute each node's subnet routes and exit-node status once; the
 	// O(n^2) pair scans below would otherwise recompute them for every pair.
+	// dst is what a node can be reached at beyond its own addresses:
+	// its subnet routes and the VIPs of the services it may host.
 	type nodeRoutes struct {
 		subnet []netip.Prefix
+		dst    []netip.Prefix
 		isExit bool
 	}
 
 	routeInfo := make(map[types.NodeID]nodeRoutes, nodes.Len())
 	for _, n := range nodes.All() {
-		routeInfo[n.ID()] = nodeRoutes{subnet: n.SubnetRoutes(), isExit: n.IsExitNode()}
+		subnet := n.SubnetRoutes()
+		routeInfo[n.ID()] = nodeRoutes{
+			subnet: subnet,
+			dst:    slices.Concat(subnet, pm.pol.nodeServiceVIPs(n)),
+			isExit: n.IsExitNode(),
+		}
 	}
 
 	// If we have a global filter, use it for all nodes (normal case).
@@ -727,8 +750,8 @@ func (pm *PolicyManager) BuildPeerMap(nodes views.Slice[types.NodeView]) map[typ
 				}
 
 				ri, rj := routeInfo[nodes.At(i).ID()], routeInfo[nodes.At(j).ID()]
-				if nodes.At(i).CanAccessWithRoutes(pm.matchers, nodes.At(j), ri.subnet, rj.subnet, rj.isExit) ||
-					nodes.At(j).CanAccessWithRoutes(pm.matchers, nodes.At(i), rj.subnet, ri.subnet, ri.isExit) {
+				if nodes.At(i).CanAccessWithRoutes(pm.matchers, nodes.At(j), ri.subnet, rj.dst, rj.isExit) ||
+					nodes.At(j).CanAccessWithRoutes(pm.matchers, nodes.At(i), rj.subnet, ri.dst, ri.isExit) {
 					ret[nodes.At(i).ID()] = append(ret[nodes.At(i).ID()], nodes.At(j).ID())
 					ret[nodes.At(j).ID()] = append(ret[nodes.At(j).ID()], nodes.At(i).ID())
 				}
@@ -776,10 +799,10 @@ func (pm *PolicyManager) BuildPeerMap(nodes views.Slice[types.NodeView]) map[typ
 			//      using nodeI's matchers? (reverse direction: the matchers
 			//      on the via node accept traffic FROM the source)
 			// Same for matchersJ in both directions.
-			canIAccessJ := hasFilterI && nodeI.CanAccessWithRoutes(matchersI, nodeJ, riI.subnet, riJ.subnet, riJ.isExit)
-			canJAccessI := hasFilterJ && nodeJ.CanAccessWithRoutes(matchersJ, nodeI, riJ.subnet, riI.subnet, riI.isExit)
-			canJReachI := hasFilterI && nodeJ.CanAccessWithRoutes(matchersI, nodeI, riJ.subnet, riI.subnet, riI.isExit)
-			canIReachJ := hasFilterJ && nodeI.CanAccessWithRoutes(matchersJ, nodeJ, riI.subnet, riJ.subnet, riJ.isExit)
+			canIAccessJ := hasFilterI && nodeI.CanAccessWithRoutes(matchersI, nodeJ, riI.subnet, riJ.dst, riJ.isExit)
+			canJAccessI := hasFilterJ && nodeJ.CanAccessWithRoutes(matchersJ, nodeI, riJ.subnet, riI.dst, riI.isExit)
+			canJReachI := hasFilterI && nodeJ.CanAccessWithRoutes(matchersI, nodeI, riJ.subnet, riI.dst, riI.isExit)
+			canIReachJ := hasFilterJ && nodeI.CanAccessWithRoutes(matchersJ, nodeJ, riI.subnet, riJ.dst, riJ.isExit)
 
 			if canIAccessJ || canJAccessI || canJReachI || canIReachJ {
 				ret[nodeI.ID()] = append(ret[nodeI.ID()], nodeJ.ID())
@@ -834,7 +857,7 @@ func (pm *PolicyManager) filterForNodeLocked(
 		)
 	}
 
-	reduced := policyutil.ReduceFilterRules(node, unreduced)
+	reduced := policyutil.ReduceFilterRulesWithServices(node, unreduced, pm.pol.nodeServiceVIPs(node))
 	if pm.cacheableLocked(node) {
 		pm.filterRulesMap.Store(node.ID(), reduced)
 	}
