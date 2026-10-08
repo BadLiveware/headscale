@@ -167,6 +167,9 @@ type State struct {
 	// pings tracks pending ping requests and their response channels.
 	pings *pingTracker
 
+	// claims caches the DNS records of node-claimed hostnames.
+	claims hostnameClaims
+
 	// sshCheckAuth tracks when source nodes last completed SSH check auth.
 	//
 	// For rules without explicit checkPeriod (default 12h), auth covers any
@@ -373,7 +376,7 @@ func (s *State) ReloadPolicy() ([]change.Change, error) {
 	// Nodes whose CapMap shifted get their self refresh from
 	// [State.DrainSelfRefreshes] when these changes are dispatched.
 	//nolint:prealloc // cs starts with one element and may grow
-	cs := []change.Change{change.PolicyChange()}
+	cs := s.withHostnameClaims([]change.Change{change.PolicyChange()})
 
 	// Always call autoApproveNodes during policy reload, regardless of whether
 	// the policy content has changed. This ensures that routes are re-evaluated
@@ -637,10 +640,10 @@ func (s *State) DeleteNode(node types.NodeView) ([]change.Change, error) {
 
 	policyChange, err := s.updatePolicyManagerNodes(genBefore)
 	if err != nil {
-		return []change.Change{removed, policyChange}, fmt.Errorf("updating policy manager after node deletion: %w", err)
+		return s.withHostnameClaims([]change.Change{removed, policyChange}), fmt.Errorf("updating policy manager after node deletion: %w", err)
 	}
 
-	return []change.Change{removed, policyChange}, nil
+	return s.withHostnameClaims([]change.Change{removed, policyChange}), nil
 }
 
 // Connect acquires a control session and returns the resulting changes
@@ -689,7 +692,7 @@ func (s *State) Connect(id types.NodeID) ([]change.Change, uint64) {
 		c = append(c, change.PolicyChange())
 	}
 
-	return c, epoch
+	return s.withHostnameClaims(c), epoch
 }
 
 // Disconnect releases one poll session previously acquired by
@@ -758,7 +761,7 @@ func (s *State) Disconnect(id types.NodeID, epoch uint64) ([]change.Change, erro
 		cs = append(cs, change.PolicyChange())
 	}
 
-	return cs, nil
+	return s.withHostnameClaims(cs), nil
 }
 
 // GetNodeByID retrieves a node by ID.
@@ -963,7 +966,7 @@ func (s *State) SetNodeExpiry(nodeID types.NodeID, expiry *time.Time) (types.Nod
 
 	// Resolve expiry and online status together from the current snapshot
 	// when the mapper sends the change, including after a rapid restoration.
-	c = c.Merge(change.NodeAdded(n.ID())).Merge(recompute)
+	c = c.Merge(change.NodeAdded(n.ID())).Merge(recompute).Merge(s.refreshHostnameClaims())
 
 	return n, c, nil
 }
@@ -1039,7 +1042,7 @@ func (s *State) SetNodeTags(nodeID types.NodeID, tags []string) (types.NodeView,
 	// Setting OriginNode ensures the node gets a self-update with the new tags.
 	c.OriginNode = nodeID
 
-	return nodeView, c, nil
+	return nodeView, c.Merge(s.refreshHostnameClaims()), nil
 }
 
 // SetApprovedRoutes sets the network routes that a node is approved to advertise.
@@ -1249,7 +1252,7 @@ func (s *State) ExpireExpiredNodes(lastCheck time.Time) (time.Time, []change.Cha
 	}
 
 	if len(updates) > 0 {
-		return started, updates, true
+		return started, s.withHostnameClaims(updates), true
 	}
 
 	return started, nil, false
