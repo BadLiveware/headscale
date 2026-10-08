@@ -126,7 +126,8 @@ The `hostnameClaims` section of the [policy](policy.md) states which tags may cl
 ```json title="policy.json"
 {
   "tagOwners": {
-    "tag:gateway": ["alice@"]
+    "tag:gateway": ["alice@"],
+    "tag:monitoring": ["alice@"]
   },
   "hostnameClaims": {
     // A node tagged tag:gateway that advertises svc:<label> answers at <label>.gw.example.com.
@@ -156,3 +157,29 @@ client instead.
 - A claimed hostname and an extra DNS record with the same name are both answered.
 - A client reports its advertised services to Headscale from Tailscale v1.78 on; older clients cannot claim hostnames, but
   they resolve them.
+
+### Scope each name to its own tag
+
+Any node with an allowed tag can claim any name its pattern matches.
+With `"*.gw.example.com": ["tag:gateway"]`, every `tag:gateway` node can add itself to every name in the zone, so a
+misconfigured or compromised node can take traffic for a service it does not run.
+Headscale has no first-come ownership of a name: all nodes that claim it are answered.
+
+Where this matters, give each service its own tag and an exact pattern:
+
+```json title="policy.json"
+{
+  "tagOwners": {
+    "tag:gw-cca": ["alice@"],
+    "tag:gw-billing": ["alice@"]
+  },
+  "hostnameClaims": {
+    "cca.gw.example.com": ["tag:gw-cca"],
+    "billing.gw.example.com": ["tag:gw-billing"]
+  }
+}
+```
+
+Register the nodes of each service with a pre-auth key for its tag, for example
+`headscale preauthkeys create --tags tag:gw-cca`.
+A node tagged `tag:gw-billing` that advertises `svc:cca` then claims nothing.
