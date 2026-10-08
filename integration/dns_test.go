@@ -342,46 +342,109 @@ func TestNodeClaimedHostnames(t *testing.T) {
 		return addrs
 	}
 
-	// requireResolves waits until the client resolves the claimed name, A
-	// and AAAA, to exactly want, and returns how long that took.
-	requireResolves := func(want []string, timeout time.Duration, msg string) time.Duration {
+	// requireRecords waits until the client's DNS config holds exactly the
+	// addresses of want for the claimed name. The Tailscale client answers
+	// a query with only the first address per family, so the records, not
+	// the answers, show every claimer.
+	requireRecords := func(want []TailscaleClient, timeout time.Duration, msg string) {
+		t.Helper()
+
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			stdout, _, err := client.Execute([]string{"tailscale", "dns", "status", "--json"})
+			assert.NoError(c, err)
+
+			var status struct {
+				ExtraRecords []tailcfg.DNSRecord
+			}
+
+			assert.NoError(c, json.Unmarshal([]byte(stdout), &status))
+
+			var got []string
+
+			for _, r := range status.ExtraRecords {
+				if r.Name == claimedName {
+					got = append(got, r.Value)
+				}
+			}
+
+			assert.ElementsMatch(c, addrsOf(want...), got)
+		}, timeout, 500*time.Millisecond, msg)
+	}
+
+	// requireAnswer waits until the client resolves the claimed name, A and
+	// AAAA, to the addresses of one node in candidates, and returns that
+	// node and how long the wait took.
+	requireAnswer := func(candidates []TailscaleClient, timeout time.Duration, msg string) (TailscaleClient, time.Duration) {
 		t.Helper()
 
 		start := time.Now()
+
+		var answer TailscaleClient
 
 		assert.EventuallyWithT(t, func(c *assert.CollectT) {
 			stdout, _, err := client.Execute([]string{
 				"dig", "+short", claimedName, "A", claimedName, "AAAA",
 			})
 			assert.NoError(c, err)
-			assert.ElementsMatch(c, want, strings.Fields(stdout))
+
+			answer = nil
+
+			for _, candidate := range candidates {
+				if slices.Equal(addrsOf(candidate), strings.Fields(stdout)) {
+					answer = candidate
+				}
+			}
+
+			assert.NotNilf(c, answer, "answer %q is not the A and AAAA of one candidate", stdout)
 		}, timeout, 500*time.Millisecond, msg)
 
-		return time.Since(start)
+		require.NotNil(t, answer, msg)
+
+		return answer, time.Since(start)
 	}
 
-	requireResolves(addrsOf(gateways...), integrationutil.ScaledTimeout(30*time.Second),
-		"client resolves the claimed name to both gateways and not to the rogue node")
+	requireRecords(gateways, integrationutil.ScaledTimeout(30*time.Second),
+		"client holds records for both gateways and not for the rogue node")
 
-	_, _, err = gateways[0].Execute([]string{"tailscale", "serve", "drain", service})
+	chosen, _ := requireAnswer(gateways, integrationutil.ScaledTimeout(10*time.Second),
+		"client resolves the claimed name to one gateway")
+
+	other := gateways[0]
+	if chosen == gateways[0] {
+		other = gateways[1]
+	}
+
+	_, _, err = chosen.Execute([]string{"tailscale", "serve", "drain", service})
 	require.NoError(t, err)
 
-	took := requireResolves(addrsOf(gateways[1]), integrationutil.ScaledTimeout(10*time.Second),
+	_, took := requireAnswer([]TailscaleClient{other}, integrationutil.ScaledTimeout(10*time.Second),
 		"client stops resolving the claimed name to the drained gateway")
-	t.Logf("drained gateway left the answers after %s", took)
+	t.Logf("drained gateway left the answer after %s", took)
 
-	_, _, err = gateways[0].Execute([]string{"tailscale", "serve", "advertise", service})
+	requireRecords([]TailscaleClient{other}, integrationutil.ScaledTimeout(10*time.Second),
+		"client holds records only for the remaining gateway")
+
+	_, _, err = chosen.Execute([]string{"tailscale", "serve", "advertise", service})
 	require.NoError(t, err)
 
-	requireResolves(addrsOf(gateways...), integrationutil.ScaledTimeout(10*time.Second),
-		"client resolves the claimed name to both gateways again")
+	requireRecords(gateways, integrationutil.ScaledTimeout(10*time.Second),
+		"client holds records for both gateways again")
 
-	err = gateways[1].Down()
+	// Rendezvous ordering gives the client the same gateway as before.
+	chosen, _ = requireAnswer([]TailscaleClient{chosen}, integrationutil.ScaledTimeout(10*time.Second),
+		"client returns to its gateway")
+
+	other = gateways[0]
+	if chosen == gateways[0] {
+		other = gateways[1]
+	}
+
+	err = chosen.Down()
 	require.NoError(t, err)
 
 	// Headscale waits up to 10 s for a reconnect before it marks a node
 	// offline.
-	took = requireResolves(addrsOf(gateways[0]), integrationutil.ScaledTimeout(30*time.Second),
+	_, took = requireAnswer([]TailscaleClient{other}, integrationutil.ScaledTimeout(30*time.Second),
 		"client stops resolving the claimed name to the offline gateway")
-	t.Logf("offline gateway left the answers after %s", took)
+	t.Logf("offline gateway left the answer after %s", took)
 }
