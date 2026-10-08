@@ -170,6 +170,10 @@ type State struct {
 	// claims caches the DNS records of node-claimed hostnames.
 	claims hostnameClaims
 
+	// services holds the virtual IP addresses of Tailscale Services and
+	// their active hosts.
+	services services
+
 	// sshCheckAuth tracks when source nodes last completed SSH check auth.
 	//
 	// For rules without explicit checkPeriod (default 12h), auth covers any
@@ -293,6 +297,15 @@ func NewState(cfg *types.Config) (*State, error) {
 		registerLocks: xsync.NewMap[key.MachinePublic, *sync.Mutex](),
 	}
 
+	_, err = s.loadServiceVIPs()
+	if err != nil {
+		return nil, fmt.Errorf("loading service addresses: %w", err)
+	}
+
+	// The first peer maps were built before the service addresses were
+	// known; hosts are peers of the nodes that may reach their services.
+	s.nodeStore.RebuildPeerMaps()
+
 	// Surface nodes whose stored data would break map generation (e.g. an
 	// invalid given name from a legacy row) so an operator can fix them. This
 	// only logs; it never mutates a node's stored name at boot.
@@ -362,6 +375,13 @@ func (s *State) ReloadPolicy() ([]change.Change, error) {
 	if err != nil {
 		return nil, fmt.Errorf("setting policy: %w", err)
 	}
+
+	servicesChanged, err := s.loadServiceVIPs()
+	if err != nil {
+		return nil, fmt.Errorf("loading service addresses: %w", err)
+	}
+
+	policyChanged = policyChanged || servicesChanged
 
 	// Clear SSH check auth times when policy changes to ensure stale
 	// approvals don't persist if checkPeriod rules are modified or removed.
@@ -1312,6 +1332,13 @@ func (s *State) SetPolicy(pol []byte) (bool, error) {
 		return changed, err
 	}
 
+	servicesChanged, err := s.loadServiceVIPs()
+	if err != nil {
+		return changed, fmt.Errorf("loading service addresses: %w", err)
+	}
+
+	changed = changed || servicesChanged
+
 	// Clear SSH check auth times when policy changes.
 	s.ClearSSHCheckAuth()
 
@@ -1427,6 +1454,8 @@ func (s *State) RoutesForPeer(
 			}
 		}
 	}
+
+	reduced = append(reduced, s.serviceRoutesForPeer(viewer, peer, matchers)...)
 
 	// Co-router visibility: when the viewer advertises the same prefix
 	// that the peer is HA primary for, the viewer must see that route
@@ -3149,12 +3178,14 @@ func (s *State) DrainSelfRefreshes() []change.Change {
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
 
-	cs := make([]change.Change, 0, len(ids))
+	moves := s.drainServiceMoves()
+
+	cs := make([]change.Change, 0, len(ids)+len(moves))
 	for _, id := range ids {
 		cs = append(cs, change.SelfUpdate(id))
 	}
 
-	return cs
+	return append(cs, moves...)
 }
 
 // updatePolicyManagerNodes refreshes the policy manager with current node

@@ -26,6 +26,11 @@ const (
 type claimRecord struct {
 	nodeID types.NodeID
 	record tailcfg.DNSRecord
+
+	// service is set when the record points at the virtual IP of a
+	// Tailscale Service; such a record is visible to the viewers the
+	// policy lets reach the service, and nodeID is zero.
+	service tailcfg.ServiceName
 }
 
 // hostnameClaims caches the records derived from node claims, so a map
@@ -106,10 +111,16 @@ func deriveClaimRecords(
 // or going offline, a node's advertised services, tags or addresses, a
 // node's deletion, and a policy change.
 func (s *State) refreshHostnameClaims() change.Change {
+	s.refreshServiceHosts()
+
 	s.claims.mu.Lock()
 	defer s.claims.mu.Unlock()
 
-	next := deriveClaimRecords(s.nodeStore.ListNodes(), s.polMan.ServiceHostnames, s.cfg.BaseDomain)
+	nodes := s.nodeStore.ListNodes()
+	next := s.withServiceRecords(
+		deriveClaimRecords(nodes, s.polMan.ServiceHostnames, s.cfg.BaseDomain),
+		nodes,
+	)
 
 	var prev []claimRecord
 	if p := s.claims.records.Load(); p != nil {
@@ -161,10 +172,19 @@ func (s *State) HostnameClaimRecords(viewer types.NodeID) []tailcfg.DNSRecord {
 	}
 
 	peers := s.nodeStore.ListPeerIDs(viewer)
+	mayReach := s.serviceAccessFunc(viewer)
 
 	var visible []claimRecord
 
 	for _, r := range *all {
+		if r.service != "" {
+			if mayReach(r.service) {
+				visible = append(visible, r)
+			}
+
+			continue
+		}
+
 		_, isPeer := slices.BinarySearch(peers, r.nodeID)
 		if r.nodeID != viewer && !isPeer {
 			continue

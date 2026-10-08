@@ -11,6 +11,9 @@ import (
 
 var errServiceVIPsMissing = errors.New("service has no virtual IP address")
 
+// gormDialectSQLite is what [gorm.DB.Name] returns for SQLite.
+const gormDialectSQLite = "sqlite"
+
 // servicesDDLSQLite matches schema.sql byte for byte; the squibble digest
 // of the SQLite schema is the source of truth.
 const servicesDDLSQLite = `CREATE TABLE services(
@@ -41,7 +44,7 @@ func ensureServicesTable(tx *gorm.DB) error {
 	}
 
 	ddl := servicesDDLSQLite
-	if tx.Name() != "sqlite" {
+	if tx.Name() != gormDialectSQLite {
 		ddl = servicesDDLPostgres
 	}
 
