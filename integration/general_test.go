@@ -1944,3 +1944,87 @@ func Test2118DeletingOnlineNodePanics(t *testing.T) {
 	assert.True(t, nodeListAfter[0].Online)
 	assert.Equal(t, nodeList[1].Id, nodeListAfter[0].Id)
 }
+
+// TestNoisePingFindsCutNode cuts the network path of one node with a
+// blackhole route, without closing its control connection, and checks that
+// Headscale marks it offline within the default Noise ping settings
+// (noise.ping_after_idle 30s + noise.ping_timeout 20s + the 10 s reconnect
+// grace). The other nodes, of every tested client version, stay idle and
+// must stay online through several ping rounds: they answer every PING.
+func TestNoisePingFindsCutNode(t *testing.T) {
+	IntegrationSkip(t)
+
+	const (
+		pingAfterIdle = 30 * time.Second
+		pingTimeout   = 20 * time.Second
+		offlineGrace  = 10 * time.Second
+		pingRounds    = 4
+	)
+
+	spec := ScenarioSpec{
+		NodesPerUser: len(MustTestVersions) + 1,
+		Users:        []string{"user1"},
+	}
+
+	scenario, err := NewScenario(spec)
+	require.NoError(t, err)
+
+	defer scenario.ShutdownAssertNoPanics(t)
+
+	err = scenario.CreateHeadscaleEnv(
+		[]tsic.Option{tsic.WithPackages("iproute2")},
+		hsic.WithTestName("noiseping"),
+	)
+	requireNoErrHeadscaleEnv(t, err)
+
+	headscale, err := scenario.Headscale()
+	requireNoErrGetHeadscale(t, err)
+
+	allClients, err := scenario.ListTailscaleClients()
+	requireNoErrListClients(t, err)
+
+	err = scenario.WaitForTailscaleSync()
+	requireNoErrSync(t, err)
+
+	cut := allClients[0]
+	hsIP := headscale.GetIPInNetwork(scenario.Networks()[0])
+
+	start := time.Now()
+
+	// The node can no longer send to headscale, not even TCP ACKs, while
+	// its sockets stay open: nothing tells either side the path is gone.
+	// A route works on every client image; iptables depends on the
+	// kernel modules of the host.
+	_, _, err = cut.Execute([]string{"ip", "route", "add", "blackhole", hsIP + "/32"})
+	require.NoErrorf(t, err, "cutting %s from headscale", cut.Hostname())
+
+	var cutOfflineAfter time.Duration
+
+	// One ListNodes call per tick checks both properties: the cut node goes
+	// offline in time, and no other node ever goes offline.
+	deadline := start.Add(pingRounds * pingAfterIdle)
+	for time.Now().Before(deadline) {
+		nodes, err := headscale.ListNodes()
+		require.NoError(t, err)
+
+		for _, node := range nodes {
+			if node.Name == cut.Hostname() {
+				if !node.Online && cutOfflineAfter == 0 {
+					cutOfflineAfter = time.Since(start)
+				}
+
+				continue
+			}
+
+			require.Truef(t, node.Online,
+				"idle healthy node %s went offline %s after the cut", node.Name, time.Since(start))
+		}
+
+		time.Sleep(time.Second)
+	}
+
+	require.NotZero(t, cutOfflineAfter, "cut node %s still online after %s", cut.Hostname(), time.Since(start))
+	t.Logf("cut node offline after %s; idle nodes stayed online for %s", cutOfflineAfter, time.Since(start))
+
+	assert.LessOrEqual(t, cutOfflineAfter, integrationutil.ScaledTimeout(pingAfterIdle+pingTimeout+offlineGrace+10*time.Second))
+}
