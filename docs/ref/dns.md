@@ -109,3 +109,47 @@ hostname and port combination "http://hostname-in-magic-dns.myvpn.example.com:30
 
     }
     ```
+
+## Node-claimed hostnames
+
+A tagged node can claim a hostname, and Headscale answers that hostname with the addresses of every online node that claims it.
+Use it to give one stable name to a service that runs on several nodes, for example the replicas of a load balancer.
+The records reach clients through the network map, and the Tailscale client answers them locally with
+[MagicDNS](https://tailscale.com/docs/features/magicdns), like [extra DNS records](#setting-extra-dns-records).
+Headscale does not need a restart when a claim changes.
+
+The `hostnameClaims` section of the [policy](policy.md) states which tags may claim which hostnames:
+
+```json title="policy.json"
+{
+  "tagOwners": {
+    "tag:gateway": ["alice@"]
+  },
+  "hostnameClaims": {
+    // A node tagged tag:gateway that advertises svc:<label> answers at <label>.gw.example.com.
+    "*.gw.example.com": ["tag:gateway"],
+    // Only the label "grafana" may be claimed here.
+    "grafana.example.com": ["tag:monitoring"]
+  }
+}
+```
+
+A node claims a hostname when it advertises the service `svc:<label>`, where `<label>` is the first label of the
+hostname.
+A node withdraws its claim when it stops advertising the service:
+
+```console
+tailscale serve advertise svc:cca  # claims cca.gw.example.com
+tailscale serve drain svc:cca      # withdraws the claim
+```
+
+A [tsnet](https://tailscale.com/docs/features/tsnet) program sets the `AdvertiseServices` preference through its local
+client instead.
+
+- Only tagged nodes can claim hostnames, and only the hostnames their tags allow.
+- A node that goes offline loses its claims until it is online again.
+- A node gets only the records of nodes it can reach under the policy.
+- A claimed hostname directly below `dns.base_domain` is ignored, so a claim cannot shadow the MagicDNS name of a node.
+- A claimed hostname and an extra DNS record with the same name are both answered.
+- A client reports its advertised services to Headscale from Tailscale v1.78 on; older clients cannot claim hostnames, but
+  they resolve them.
