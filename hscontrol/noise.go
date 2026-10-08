@@ -207,6 +207,7 @@ func (h *Headscale) NoiseUpgradeHandler(
 	ns.httpBaseConfig = &http.Server{
 		Handler:           r,
 		ReadHeaderTimeout: types.HTTPTimeout,
+		HTTP2:             noiseHTTP2Config(h.cfg.Noise),
 	}
 	ns.http2Server = &http2.Server{}
 
@@ -216,6 +217,27 @@ func (h *Headscale) NoiseUpgradeHandler(
 			BaseConfig: ns.httpBaseConfig,
 		},
 	)
+}
+
+// noiseHTTP2Config returns the HTTP/2 settings of a Noise connection. A
+// node keeps one map request open on it for as long as it is online, and
+// the connection carries few frames from the node. When the network path
+// is cut without a close, nothing fails until TCP gives up, which takes
+// minutes, and the node stays online. A PING after cfg.PingAfterIdle
+// without reading anything, answered within cfg.PingTimeout or the
+// connection is closed, finds such a node. A healthy client answers PING
+// frames in its HTTP/2 transport, idle or not.
+//
+// [http2.Server.ServeConn] applies these settings from the base server.
+func noiseHTTP2Config(cfg types.NoiseConfig) *http.HTTP2Config {
+	if cfg.PingAfterIdle <= 0 {
+		return nil
+	}
+
+	return &http.HTTP2Config{
+		SendPingTimeout: cfg.PingAfterIdle,
+		PingTimeout:     cfg.PingTimeout,
+	}
 }
 
 func unsupportedClientError(version tailcfg.CapabilityVersion) error {

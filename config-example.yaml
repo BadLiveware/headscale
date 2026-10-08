@@ -38,6 +38,30 @@ noise:
   # will be automatically generated.
   private_key_path: /var/lib/headscale/noise_private.key
 
+  # Health check of the control connection every online node keeps open.
+  #
+  # When headscale has read nothing from a node for ping_after_idle, it sends
+  # an HTTP/2 PING on the connection. If the node does not answer within
+  # ping_timeout, headscale closes the connection, and the node is marked
+  # offline unless it reconnects within 10 seconds. A healthy client answers
+  # every PING, idle or not, and stays connected.
+  #
+  # Without the check, a node whose network path is lost without a clean close
+  # (host crash, cable pull, Wi-Fi gone, laptop asleep) stays online until TCP
+  # gives up, which takes about 15 minutes on Linux, or longer behind a
+  # reverse proxy.
+  #
+  # With the defaults, such a node is offline 30 to 60 seconds after the loss.
+  # A node is only marked offline when it is unreachable for more than
+  # ping_timeout and does not reconnect within 10 seconds, so short gaps on
+  # mobile networks do not mark it offline. An idle node exchanges one small
+  # PING and answer about every ping_after_idle.
+  #
+  # Set ping_after_idle to 0 to disable the check.
+  # ping_after_idle must be >= 5s when enabled; ping_timeout must be >= 1s.
+  ping_after_idle: 30s
+  ping_timeout: 20s
+
 # List of IP prefixes to allocate tailaddresses from.
 # Each prefix consists of either an IPv4 or IPv6 address,
 # and the associated prefix length, delimited by a slash.

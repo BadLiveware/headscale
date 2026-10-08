@@ -39,3 +39,25 @@
         # Version {{ headscale.version }}
         curl -o config.yaml https://raw.githubusercontent.com/juanfont/headscale/v{{ headscale.version }}/config-example.yaml
         ```
+
+## Node connection health
+
+Every online node keeps one control connection open to Headscale.
+When the network path of a node is lost without a clean close, for example when its host crashes, its cable is pulled or
+it falls asleep, Headscale would only notice when TCP gives up, which takes about 15 minutes on Linux.
+Until then the node stays online for its peers, and its subnet routes, exit node and other online-only roles stay with it.
+
+Headscale therefore checks the connection with HTTP/2 PING frames:
+
+- When Headscale has read nothing from a node for `noise.ping_after_idle` (default `30s`), it sends a PING.
+- When the node does not answer within `noise.ping_timeout` (default `20s`), Headscale closes the connection.
+- When the node does not reconnect within 10 seconds, Headscale marks it offline.
+
+A node is offline 30 to 60 seconds after it is lost with the defaults.
+A healthy client answers every PING in its HTTP/2 stack, so an idle client stays connected.
+A client on a bad network is marked offline only when it cannot answer for more than `noise.ping_timeout` and then does
+not reconnect within 10 seconds.
+Lower values find lost nodes sooner, but mark nodes on slow or unstable networks offline more often, and make idle
+devices, such as phones, wake their radio more often.
+Set `noise.ping_after_idle: 0` to disable the check.
+
