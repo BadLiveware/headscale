@@ -315,7 +315,10 @@ func (m *mapper) selfMapResponse(
 //
 // DNSConfig is left out: it forces clients into a full netmap rebuild, and
 // the node's DNS config inputs arrive with its own [change.SelfUpdate], see
-// [state.State.DrainSelfRefreshes].
+// [state.State.DrainSelfRefreshes]. The exception is node-claimed hostnames:
+// a node only gets the claims of nodes it can see, and a policy change can
+// change what it sees. The connection drops a DNSConfig equal to the one its
+// client holds, see [connectionEntry.withDNSConfigDelta].
 //
 // This avoids the issue where an empty Peers slice is interpreted by Tailscale
 // clients as "no change" rather than "no peers".
@@ -330,6 +333,10 @@ func (m *mapper) policyChangeResponse(
 		WithPacketFilters().
 		WithSSHPolicy().
 		WithSelfNode()
+
+	if m.state.HasHostnameClaims() {
+		builder.WithDNSConfig()
+	}
 
 	// Send remaining peers in PeersChanged - their AllowedIPs may have
 	// changed due to the policy update (e.g., different routes allowed).
