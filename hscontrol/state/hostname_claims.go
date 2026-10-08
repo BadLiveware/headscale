@@ -149,6 +149,11 @@ func (s *State) HasHostnameClaims() bool {
 // HostnameClaimRecords returns the claimed-hostname records that viewer may
 // see: those of viewer itself and of the nodes the policy makes its peers.
 // A viewer that cannot reach a node does not learn its name or addresses.
+//
+// The order matters: the Tailscale client answers a name with only the
+// first address of each family it holds for that name. The records are
+// therefore ordered per viewer, see [orderClaimRecordsForViewer], so that
+// viewers spread over the claiming nodes.
 func (s *State) HostnameClaimRecords(viewer types.NodeID) []tailcfg.DNSRecord {
 	all := s.claims.records.Load()
 	if all == nil || len(*all) == 0 {
@@ -157,7 +162,7 @@ func (s *State) HostnameClaimRecords(viewer types.NodeID) []tailcfg.DNSRecord {
 
 	peers := s.nodeStore.ListPeerIDs(viewer)
 
-	var records []tailcfg.DNSRecord
+	var visible []claimRecord
 
 	for _, r := range *all {
 		_, isPeer := slices.BinarySearch(peers, r.nodeID)
@@ -165,10 +170,50 @@ func (s *State) HostnameClaimRecords(viewer types.NodeID) []tailcfg.DNSRecord {
 			continue
 		}
 
-		records = append(records, r.record)
+		visible = append(visible, r)
+	}
+
+	orderClaimRecordsForViewer(visible, viewer)
+
+	records := make([]tailcfg.DNSRecord, len(visible))
+	for i, r := range visible {
+		records[i] = r.record
 	}
 
 	return records
+}
+
+// orderClaimRecordsForViewer sorts records by name and, within a name, puts
+// the records of the node with the highest rendezvous score for viewer
+// first. Rendezvous (highest random weight) hashing gives each viewer a
+// stable choice of node per name, spreads viewers evenly over the nodes,
+// and when a node leaves, only the viewers that chose it move.
+func orderClaimRecordsForViewer(records []claimRecord, viewer types.NodeID) {
+	slices.SortStableFunc(records, func(a, b claimRecord) int {
+		return cmp.Or(
+			strings.Compare(a.record.Name, b.record.Name),
+			cmp.Compare(rendezvousScore(viewer, b.nodeID), rendezvousScore(viewer, a.nodeID)),
+			cmp.Compare(a.nodeID, b.nodeID),
+			strings.Compare(a.record.Type, b.record.Type),
+		)
+	})
+}
+
+// rendezvousScore is a deterministic pseudo-random weight for the pair,
+// the SplitMix64 finaliser over both IDs. It is stable across restarts, so
+// a viewer keeps its choice of node.
+func rendezvousScore(viewer, node types.NodeID) uint64 {
+	const (
+		golden = 0x9e3779b97f4a7c15
+		mix1   = 0xbf58476d1ce4e5b9
+		mix2   = 0x94d049bb133111eb
+	)
+
+	z := uint64(viewer)*golden + uint64(node)
+	z = (z ^ (z >> 30)) * mix1
+	z = (z ^ (z >> 27)) * mix2
+
+	return z ^ (z >> 31)
 }
 
 // SetNodeAdvertisedServices stores the services a node reports as active
