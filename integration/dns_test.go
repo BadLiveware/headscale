@@ -237,8 +237,8 @@ func TestNodeClaimedHostnames(t *testing.T) {
 		gatewayUser = "gateway"
 		rogueUser   = "rogue"
 		clientUser  = "client"
-		service     = "svc:cca"
-		claimedName = "cca.gw.example.com"
+		service     = "svc:grafana"
+		claimedName = "grafana.gw.example.com"
 	)
 
 	spec := ScenarioSpec{Users: []string{gatewayUser, rogueUser, clientUser}}

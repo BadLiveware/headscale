@@ -120,8 +120,8 @@ func TestServiceHostnames(t *testing.T) {
 		{
 			name:     "wildcard-zone-any-label",
 			node:     tagged("tag:gateway"),
-			services: []string{"svc:cca", "svc:web"},
-			want:     []string{"cca.gw.mgmt.example.com", "web.gw.mgmt.example.com"},
+			services: []string{"svc:gitea", "svc:web"},
+			want:     []string{"gitea.gw.mgmt.example.com", "web.gw.mgmt.example.com"},
 		},
 		{
 			name:     "exact-name-and-wildcard",
@@ -132,26 +132,26 @@ func TestServiceHostnames(t *testing.T) {
 		{
 			name:     "exact-name-only-for-its-label",
 			node:     tagged("tag:monitoring"),
-			services: []string{"svc:grafana", "svc:cca"},
+			services: []string{"svc:grafana", "svc:gitea"},
 			want:     []string{"grafana.mgmt.example.com"},
 		},
 		{
 			name:     "tag-without-claims",
 			node:     tagged("tag:other"),
-			services: []string{"svc:cca"},
+			services: []string{"svc:gitea"},
 			want:     nil,
 		},
 		{
 			name:     "untagged-node-cannot-claim",
 			node:     untagged,
-			services: []string{"svc:cca"},
+			services: []string{"svc:gitea"},
 			want:     nil,
 		},
 		{
 			name:     "malformed-service-names-are-ignored",
 			node:     tagged("tag:gateway"),
-			services: []string{"cca", "svc:", "svc:a_b", "svc:CCA"},
-			want:     []string{"cca.gw.mgmt.example.com"},
+			services: []string{"gitea", "svc:", "svc:a_b", "svc:GITEA"},
+			want:     []string{"gitea.gw.mgmt.example.com"},
 		},
 		{
 			name:     "no-services",
@@ -178,10 +178,10 @@ func TestServiceHostnamesFollowPolicyReload(t *testing.T) {
 	}`), users, views.SliceOf([]types.NodeView{gw}))
 	require.NoError(t, err)
 
-	assert.Equal(t, []string{"cca.gw.example.com"}, pm.ServiceHostnames(gw, []string{"svc:cca"}))
+	assert.Equal(t, []string{"gitea.gw.example.com"}, pm.ServiceHostnames(gw, []string{"svc:gitea"}))
 
 	_, err = pm.SetPolicy([]byte(`{"tagOwners": {"tag:gateway": ["user@"]}}`))
 	require.NoError(t, err)
 
-	assert.Empty(t, pm.ServiceHostnames(gw, []string{"svc:cca"}))
+	assert.Empty(t, pm.ServiceHostnames(gw, []string{"svc:gitea"}))
 }
