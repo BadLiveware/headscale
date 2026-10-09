@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/juanfont/headscale/hscontrol/policy"
 	"github.com/juanfont/headscale/hscontrol/policy/matcher"
@@ -25,10 +26,15 @@ type serviceVIPMap map[tailcfg.ServiceName][]netip.Addr
 // serviceHostMap maps a service to the sorted IDs of its active hosts.
 type serviceHostMap map[tailcfg.ServiceName][]types.NodeID
 
-// serviceHostIndex is the set of active service hosts, indexed both ways.
+// serviceHostIndex is the set of active service hosts, indexed both ways,
+// and the host each client is assigned to. It is immutable once stored.
 type serviceHostIndex struct {
 	hosts  serviceHostMap
 	byNode map[types.NodeID][]tailcfg.ServiceName
+
+	// assigned is the host each viewer uses per service. A viewer keeps it
+	// while that host is active and visible, see [serviceHostIndex.hostFor].
+	assigned map[tailcfg.ServiceName]map[types.NodeID]types.NodeID
 }
 
 // services holds the VIPs of Tailscale Services and which nodes host them.
@@ -51,6 +57,9 @@ type services struct {
 
 	movedMu sync.Mutex
 	moved   []func()
+
+	// startedAt starts the startup grace, see [State.followRendezvous].
+	startedAt time.Time
 }
 
 // loadServiceVIPs reads the stored VIPs, allocates VIPs for the services
@@ -120,8 +129,9 @@ func deriveServiceHosts(
 	vips serviceVIPMap,
 ) *serviceHostIndex {
 	idx := &serviceHostIndex{
-		hosts:  serviceHostMap{},
-		byNode: map[types.NodeID][]tailcfg.ServiceName{},
+		hosts:    serviceHostMap{},
+		byNode:   map[types.NodeID][]tailcfg.ServiceName{},
+		assigned: map[tailcfg.ServiceName]map[types.NodeID]types.NodeID{},
 	}
 
 	if len(vips) == 0 {
@@ -180,17 +190,23 @@ func chooseServiceHost(viewer types.NodeID, hosts, peers []types.NodeID) (types.
 	return best, found
 }
 
-// refreshServiceHosts derives the active hosts of each service. For every
-// online viewer whose chosen host of a service changes, it queues a change
-// targeted at that viewer with the old and the new host as changed peers:
-// the old host's AllowedIPs lose the VIPs, the new host's gain them. Other
-// viewers get nothing. [State.DrainSelfRefreshes] hands the queue to the
-// batcher.
+// refreshServiceHosts derives the active hosts of each service and the
+// host each online viewer uses, see [nextServiceHost]: a viewer keeps its
+// host while that host is active, so a joining host takes nobody at once,
+// and the viewers of a leaving host move to their rendezvous choice. For
+// every viewer whose host changes, it queues a change targeted at that
+// viewer with the old and the new host as changed peers: the old host's
+// AllowedIPs lose the VIPs, the new host's gain them. Other viewers get
+// nothing.
 func (s *State) refreshServiceHosts() {
-	if !s.refreshServiceHostsLocked() {
-		return
+	if s.refreshServiceHostsLocked() {
+		s.notifyServiceMoves()
 	}
+}
 
+// notifyServiceMoves runs the [State.OnServiceHostsMoved] callbacks, which
+// hand the queued changes to the batcher.
+func (s *State) notifyServiceMoves() {
 	s.services.movedMu.Lock()
 	fns := slices.Clone(s.services.moved)
 	s.services.movedMu.Unlock()
@@ -198,6 +214,14 @@ func (s *State) refreshServiceHosts() {
 	for _, fn := range fns {
 		fn()
 	}
+}
+
+// followRendezvous reports whether clients follow their rendezvous choice
+// at once, which they do during the startup grace: assignments live in
+// memory, and without it the first host back after a restart would keep
+// every client.
+func (s *State) followRendezvous() bool {
+	return time.Since(s.services.startedAt) < s.cfg.Services.StartupGrace
 }
 
 // refreshServiceHostsLocked does the work of [State.refreshServiceHosts]
@@ -213,27 +237,24 @@ func (s *State) refreshServiceHostsLocked() bool {
 
 	nodes := s.nodeStore.ListNodes()
 	next := deriveServiceHosts(nodes, s.polMan.NodeServices, *vips)
+	prev := s.services.index.Load()
+	follow := s.followRendezvous()
 
-	prev := s.services.index.Swap(next)
+	names := slices.Sorted(maps.Keys(*vips))
 
-	var changed []tailcfg.ServiceName
-
-	for name := range *vips {
-		var old []types.NodeID
-		if prev != nil {
-			old = prev.hosts[name]
-		}
-
-		if !slices.Equal(old, next.hosts[name]) {
-			changed = append(changed, name)
-		}
+	for _, name := range names {
+		next.assigned[name] = map[types.NodeID]types.NodeID{}
 	}
 
-	if len(changed) == 0 {
-		return false
+	if prev != nil {
+		for _, viewer := range nodes.All() {
+			for _, name := range names {
+				if h, ok := prev.assigned[name][viewer.ID()]; ok && !viewer.Online() {
+					next.assigned[name][viewer.ID()] = h
+				}
+			}
+		}
 	}
-
-	slices.Sort(changed)
 
 	var queued []change.Change
 
@@ -246,14 +267,13 @@ func (s *State) refreshServiceHostsLocked() bool {
 
 		var moved []types.NodeID
 
-		for _, name := range changed {
-			var old []types.NodeID
-			if prev != nil {
-				old = prev.hosts[name]
-			}
+		for _, name := range names {
+			oldHost, hadOld := prev.hostFor(viewer.ID(), name, peers)
+			newHost, hasNew := nextServiceHost(viewer.ID(), oldHost, hadOld, next.hosts[name], peers, follow)
 
-			oldHost, hadOld := chooseServiceHost(viewer.ID(), old, peers)
-			newHost, hasNew := chooseServiceHost(viewer.ID(), next.hosts[name], peers)
+			if hasNew {
+				next.assigned[name][viewer.ID()] = newHost
+			}
 
 			if hadOld == hasNew && oldHost == newHost {
 				continue
@@ -277,20 +297,26 @@ func (s *State) refreshServiceHostsLocked() bool {
 		queued = append(queued, c)
 	}
 
-	log.Debug().
-		Interface("services", changed).
-		Int("viewers.moved", len(queued)).
-		Msg("service hosts changed")
+	s.services.index.Store(next)
 
 	if len(queued) == 0 {
 		return false
 	}
 
-	s.services.pendingMu.Lock()
-	s.services.pending = append(s.services.pending, queued...)
-	s.services.pendingMu.Unlock()
+	log.Debug().
+		Int("viewers.moved", len(queued)).
+		Bool("startup_grace", follow).
+		Msg("service hosts changed")
+
+	s.queueServiceMoves(queued)
 
 	return true
+}
+
+func (s *State) queueServiceMoves(cs []change.Change) {
+	s.services.pendingMu.Lock()
+	s.services.pending = append(s.services.pending, cs...)
+	s.services.pendingMu.Unlock()
 }
 
 // OnServiceHostsMoved registers fn to run after a host change queued
@@ -337,7 +363,7 @@ func (s *State) serviceRoutesForPeer(
 	var routes []netip.Prefix
 
 	for _, name := range hosted {
-		chosen, ok := chooseServiceHost(viewer.ID(), idx.hosts[name], peers)
+		chosen, ok := idx.hostFor(viewer.ID(), name, peers)
 		if !ok || chosen != peer.ID() {
 			continue
 		}
@@ -362,7 +388,7 @@ func (s *State) ServiceHostFor(viewer types.NodeID, name tailcfg.ServiceName) (t
 		return 0, false
 	}
 
-	return chooseServiceHost(viewer, idx.hosts[name], s.nodeStore.ListPeerIDs(viewer))
+	return idx.hostFor(viewer, name, s.nodeStore.ListPeerIDs(viewer))
 }
 
 // ServiceHosts returns the sorted IDs of the active hosts of a service.

@@ -302,6 +302,8 @@ func NewState(cfg *types.Config) (*State, error) {
 		registerLocks: xsync.NewMap[key.MachinePublic, *sync.Mutex](),
 	}
 
+	s.services.startedAt = time.Now()
+
 	_, err = s.loadServiceVIPs()
 	if err != nil {
 		return nil, fmt.Errorf("loading service addresses: %w", err)
