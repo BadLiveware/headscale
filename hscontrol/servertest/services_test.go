@@ -111,16 +111,22 @@ func serviceRecords(nm *netmap.NetworkMap) []netip.Addr {
 	return claimedAddrs(nm, serviceDNSName)
 }
 
-// TestServiceVIPs checks the traffic half of Tailscale Services: the
-// service gets one VIP per family; each client carries the VIPs on exactly
-// one host peer, chosen per client; a client moves when its host withdraws
-// or goes offline, and other clients do not move; a node without an
+// TestServiceVIPs checks the traffic half of Tailscale Services during the
+// startup grace, when clients follow rendezvous: the service gets one VIP
+// per family; each client carries the VIPs on exactly one host peer, chosen
+// per client; a client moves when its host withdraws or goes offline, and
+// other clients do not move; a node without an
 // approved tag never carries the VIPs; a node without access gets neither
 // the VIPs nor the name.
 func TestServiceVIPs(t *testing.T) {
 	t.Parallel()
 
-	srv := servertest.NewServer(t, servertest.WithMagicDNS("headscale.net"))
+	// Within the startup grace clients follow rendezvous at once, which is
+	// what this test checks; TestServiceStickyRebalance covers the rest.
+	srv := servertest.NewServer(t,
+		servertest.WithMagicDNS("headscale.net"),
+		servertest.WithServices(types.ServicesConfig{StartupGrace: time.Hour}),
+	)
 	user := srv.CreateUser(t, "svc-user")
 	reloadPolicy(t, srv, servicesPolicy)
 
@@ -442,4 +448,183 @@ func TestServiceClientLosesAccess(t *testing.T) {
 		func(nm *netmap.NetworkMap) bool {
 			return len(vipCarriers(nm, vips)) == 0 && len(serviceRecords(nm)) == 0
 		})
+}
+
+// TestServiceStickyRebalance checks host assignment after the startup
+// grace: a joining host takes no client at once; the bounded rebalance
+// moves clients to it, at most one per source host per round here, until
+// every client is on its rendezvous host (tolerance 0); a leaving host
+// moves only its own clients.
+func TestServiceStickyRebalance(t *testing.T) {
+	t.Parallel()
+
+	srv := servertest.NewServer(t,
+		servertest.WithMagicDNS("headscale.net"),
+		servertest.WithServices(types.ServicesConfig{
+			Rebalance: types.ServicesRebalanceConfig{
+				Interval:              time.Minute,
+				MovesPerHostPerMinute: 1,
+			},
+		}),
+	)
+	user := srv.CreateUser(t, "svc-user")
+	reloadPolicy(t, srv, servicesPolicy)
+
+	vips := srv.State().ServiceVIPs(serviceName)
+
+	gw1 := servertest.NewClient(t, srv, "gw1", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
+	gw2 := servertest.NewClient(t, srv, "gw2", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
+
+	const numClients = 8
+
+	clients := make([]*servertest.TestClient, numClients)
+	for i := range clients {
+		clients[i] = servertest.NewClient(t, srv, fmt.Sprintf("client%d", i),
+			servertest.WithUser(user), servertest.WithTags("tag:client"))
+	}
+
+	for _, c := range clients {
+		c.WaitForPeers(t, 2, 10*time.Second)
+	}
+
+	gw1.AdvertiseServices(t, serviceName)
+
+	for _, c := range clients {
+		c.WaitForCondition(t, c.Name+" is on gw1, the only host", serviceWait,
+			func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw1" })
+	}
+
+	updatesBefore := map[string]int{}
+	for _, c := range clients {
+		updatesBefore[c.Name] = c.UpdateCount()
+	}
+
+	gw2.AdvertiseServices(t, serviceName)
+
+	require.Eventually(t, func() bool {
+		return len(srv.State().ServiceHosts(serviceName)) == 2
+	}, serviceWait, 50*time.Millisecond, "gw2 becomes an active host")
+
+	require.Never(t, func() bool {
+		for _, c := range clients {
+			if c.UpdateCount() != updatesBefore[c.Name] {
+				return true
+			}
+		}
+
+		return false
+	}, time.Second, 100*time.Millisecond, "a joining host takes no client at once")
+
+	// Each round may take one client from gw1 (1 per minute, 1-minute
+	// interval). Rounds continue until every client is on its target.
+	rounds := 0
+
+	for srv.State().RebalanceServices() {
+		rounds++
+		require.LessOrEqual(t, rounds, numClients, "the rebalance converges")
+	}
+
+	want := map[string]string{}
+
+	for _, c := range clients {
+		self := nodeIDOf(c)
+
+		hostID, ok := srv.State().ServiceHostFor(self, serviceName)
+		require.True(t, ok)
+
+		host, ok := srv.State().GetNodeByID(hostID)
+		require.True(t, ok)
+
+		want[c.Name] = host.Hostname()
+
+		c.WaitForCondition(t, c.Name+" ends on "+want[c.Name], serviceWait,
+			func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == want[c.Name] })
+	}
+
+	onGW2 := 0
+
+	for _, h := range want {
+		if h == "gw2" {
+			onGW2++
+		}
+	}
+
+	require.Equal(t, onGW2, rounds, "one client moved per round")
+	require.Positive(t, onGW2, "the rebalance gave gw2 clients: %v", want)
+	t.Logf("rebalance: %d of %d clients moved to gw2 in %d rounds", onGW2, numClients, rounds)
+
+	// gw2 leaves: only its clients move, at once.
+	updatesBefore = map[string]int{}
+	for _, c := range clients {
+		updatesBefore[c.Name] = c.UpdateCount()
+	}
+
+	gw2.AdvertiseServices(t)
+
+	for _, c := range clients {
+		c.WaitForCondition(t, c.Name+" is on gw1", serviceWait,
+			func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw1" })
+	}
+
+	require.Never(t, func() bool {
+		for _, c := range clients {
+			if want[c.Name] == "gw1" && c.UpdateCount() != updatesBefore[c.Name] {
+				return true
+			}
+		}
+
+		return false
+	}, time.Second, 100*time.Millisecond, "clients that were on gw1 get no update")
+}
+
+// TestServiceStartupGraceSpreadsClients checks that hosts that come up one
+// after another during the startup grace, as after a Headscale restart, do
+// not leave every client on the first one.
+func TestServiceStartupGraceSpreadsClients(t *testing.T) {
+	t.Parallel()
+
+	srv := servertest.NewServer(t,
+		servertest.WithMagicDNS("headscale.net"),
+		servertest.WithServices(types.ServicesConfig{StartupGrace: time.Hour}),
+	)
+	user := srv.CreateUser(t, "svc-user")
+	reloadPolicy(t, srv, servicesPolicy)
+
+	vips := srv.State().ServiceVIPs(serviceName)
+
+	gw1 := servertest.NewClient(t, srv, "gw1", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
+	gw2 := servertest.NewClient(t, srv, "gw2", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
+
+	const numClients = 8
+
+	clients := make([]*servertest.TestClient, numClients)
+	for i := range clients {
+		clients[i] = servertest.NewClient(t, srv, fmt.Sprintf("client%d", i),
+			servertest.WithUser(user), servertest.WithTags("tag:client"))
+	}
+
+	for _, c := range clients {
+		c.WaitForPeers(t, 2, 10*time.Second)
+	}
+
+	gw1.AdvertiseServices(t, serviceName)
+
+	for _, c := range clients {
+		c.WaitForCondition(t, c.Name+" is on gw1 first", serviceWait,
+			func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw1" })
+	}
+
+	gw2.AdvertiseServices(t, serviceName)
+
+	require.Eventually(t, func() bool {
+		onGW2 := 0
+
+		for _, c := range clients {
+			if carrier(c.Netmap(), vips) == "gw2" {
+				onGW2++
+			}
+		}
+
+		return onGW2 > 0
+	}, serviceWait, 50*time.Millisecond, "without any rebalance round, gw2 gets its rendezvous share at once")
 }
