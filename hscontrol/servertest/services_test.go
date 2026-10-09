@@ -687,3 +687,47 @@ func TestServiceNameYieldsToNodeName(t *testing.T) {
 	client.WaitForCondition(t, "the service record returns after the rename", serviceWait,
 		func(nm *netmap.NetworkMap) bool { return slices.Equal(serviceRecords(nm), sorted(vips)) })
 }
+
+// TestServiceAccessByUserRename checks that a client that gains access to
+// a service through a user change (here a rename into the granted group)
+// gets the VIP route, not only the name. The user change rebuilds the peer
+// relationships without any host change.
+func TestServiceAccessByUserRename(t *testing.T) {
+	t.Parallel()
+
+	srv := servertest.NewServer(t, servertest.WithMagicDNS("headscale.net"))
+	hostUser := srv.CreateUser(t, "host-user")
+	alice := srv.CreateUser(t, "alice")
+	reloadPolicy(t, srv, `{
+		"groups": {"group:svc": ["bob@"]},
+		"tagOwners": {"tag:grafana": ["host-user@"]},
+		"autoApprovers": {"services": {"svc:grafana": ["tag:grafana"]}},
+		"grants": [{"src": ["group:svc"], "dst": ["svc:grafana"], "ip": ["tcp:80"]}]
+	}`)
+
+	vips := srv.State().ServiceVIPs(serviceName)
+	require.Len(t, vips, 2)
+
+	gw := servertest.NewClient(t, srv, "gw", servertest.WithUser(hostUser), servertest.WithTags("tag:grafana"))
+	client := servertest.NewClient(t, srv, "client", servertest.WithUser(alice))
+
+	gw.AdvertiseServices(t, serviceName)
+
+	require.Eventually(t, func() bool {
+		return len(srv.State().ServiceHosts(serviceName)) == 1
+	}, serviceWait, 50*time.Millisecond, "gw becomes an active host")
+
+	client.WaitForCondition(t, "alice has no access yet", serviceWait,
+		func(nm *netmap.NetworkMap) bool {
+			return nm != nil && len(serviceRecords(nm)) == 0 && len(vipCarriers(nm, vips)) == 0
+		})
+
+	_, c, err := srv.State().RenameUser(types.UserID(alice.ID), "bob")
+	require.NoError(t, err)
+	srv.App.Change(c)
+
+	client.WaitForCondition(t, "the renamed user resolves the service", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return slices.Equal(serviceRecords(nm), sorted(vips)) })
+	client.WaitForCondition(t, "the renamed user carries the VIPs on gw", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw" })
+}

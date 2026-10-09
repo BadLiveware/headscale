@@ -3159,6 +3159,15 @@ func (s *State) updatePolicyManagerUsers() (change.Change, error) {
 		// so peer visibility reflects the new policy. Without this, the
 		// cached peersByNode stays stale until the next node write.
 		s.nodeStore.RebuildPeerMaps()
+
+		// Claimed names and service hosts depend on who sees whom.
+		claims := s.refreshHostnameClaims()
+
+		if changed {
+			return change.PolicyChange().Merge(claims), nil
+		}
+
+		return claims, nil
 	}
 
 	if changed {
@@ -3190,6 +3199,8 @@ func (s *State) DrainSelfRefreshes() []change.Change {
 
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
+
+	s.reconcileServiceHosts()
 
 	moves := s.drainServiceMoves()
 
@@ -3223,6 +3234,8 @@ func (s *State) updatePolicyManagerNodes(genBefore uint64) (change.Change, error
 		// a change here means this snapshot raced another writer and moved
 		// the policy manager away from what adjacency was built with.
 		s.nodeStore.RebuildPeerMaps()
+
+		return s.policyChangeSince(genBefore).Merge(s.refreshHostnameClaims()), nil
 	}
 
 	return s.policyChangeSince(genBefore), nil

@@ -40,6 +40,11 @@ type serviceHostIndex struct {
 	// here instead of a copy and sort of the viewer's peers.
 	hostPeers map[types.NodeID][]types.NodeID
 
+	// peerGen is the NodeStore peer-map generation hostPeers was read at.
+	// A different current generation means hostPeers may be stale, see
+	// [State.reconcileServiceHosts].
+	peerGen uint64
+
 	// assigned holds, per service, the viewers that keep a host other than
 	// their rendezvous choice (sticky after a host joined, until the
 	// rebalance moves them). Every other viewer uses its rendezvous
@@ -312,8 +317,17 @@ func (s *State) refreshServiceHostsLocked() bool {
 		return false
 	}
 
+	// Which clients are online or may reach a service can change without
+	// a host change; let the next rebalance round look again.
+	s.services.balanced = nil
+
+	// Read the generation first: a rebuild during this refresh leaves the
+	// stored generation behind, so the next reconcile refreshes again.
+	gen := s.nodeStore.PeerMapGeneration()
+
 	nodes := s.nodeStore.ListNodes()
 	next := deriveServiceHosts(nodes, s.polMan.NodeServices, *vips)
+	next.peerGen = gen
 
 	for h := range next.byNode {
 		next.hostPeers[h] = s.nodeStore.ListPeerIDs(h)
@@ -321,6 +335,12 @@ func (s *State) refreshServiceHostsLocked() bool {
 
 	prev := s.services.index.Load()
 	if sameHostView(prev, next) {
+		if prev.peerGen != gen {
+			current := *prev
+			current.peerGen = gen
+			s.services.index.Store(&current)
+		}
+
 		return false
 	}
 
@@ -424,6 +444,26 @@ func (s *State) mayReachService(viewer types.NodeView, name tailcfg.ServiceName)
 	}
 
 	return false
+}
+
+// reconcileServiceHosts refreshes the service hosts when the peer
+// relationships were rebuilt since the last refresh. The map responses
+// decide which host a client sees from the index's host peers, so a peer
+// change that no refresh followed (a user change, a policy or node write
+// that raced) would leave clients without their VIP route. It runs where
+// changes are dispatched, so every path that rebuilds peers is covered.
+// It returns whether it queued moves; the caller drains them.
+func (s *State) reconcileServiceHosts() bool {
+	if !s.HasServiceVIPs() {
+		return false
+	}
+
+	idx := s.services.index.Load()
+	if idx != nil && idx.peerGen == s.nodeStore.PeerMapGeneration() {
+		return false
+	}
+
+	return s.refreshServiceHostsLocked()
 }
 
 func (s *State) queueServiceMoves(cs []change.Change) {

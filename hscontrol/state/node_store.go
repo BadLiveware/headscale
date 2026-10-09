@@ -165,6 +165,8 @@ type Snapshot struct {
 	// peersByNode stores immutable adjacency as IDs; ListPeers resolves the
 	// corresponding views through nodeViewsByID.
 	peersByNode map[types.NodeID][]types.NodeID
+	// peerGen counts peer-map builds; a reused adjacency keeps it.
+	peerGen     uint64
 	nodesByUser map[types.UserID][]types.NodeView
 	allNodes    []types.NodeView
 
@@ -693,11 +695,19 @@ func snapshotFromNodes(
 		routes, isPrimaryRoute = electPrimaryRoutes(nodes, prevRoutes)
 	}
 
-	var peerIDsByNode map[types.NodeID][]types.NodeID
+	var (
+		peerIDsByNode map[types.NodeID][]types.NodeID
+		peerGen       uint64
+	)
+
+	if prev != nil {
+		peerGen = prev.peerGen
+	}
 
 	if reusePeers {
 		peerIDsByNode = prev.peersByNode
 	} else {
+		peerGen++
 		peersTimer := prometheus.NewTimer(nodeStorePeersCalculationDuration)
 		peerIDsByNode = peersFunc(allNodes)
 
@@ -711,6 +721,7 @@ func snapshotFromNodes(
 		nodesByNodeKey:    make(map[key.NodePublic]types.NodeView),
 		nodesByMachineKey: make(map[key.MachinePublic]map[types.UserID]types.NodeView),
 		peersByNode:       peerIDsByNode,
+		peerGen:           peerGen,
 		nodesByUser:       make(map[types.UserID][]types.NodeView),
 		routes:            routes,
 		isPrimaryRoute:    isPrimaryRoute,
@@ -1069,6 +1080,13 @@ func (s *NodeStore) PrimaryRoutesString() string {
 	}
 
 	return b.String()
+}
+
+// PeerMapGeneration returns a number that changes whenever the peer
+// relationships are rebuilt, so a consumer that caches something derived
+// from them can tell that its cache may be stale.
+func (s *NodeStore) PeerMapGeneration() uint64 {
+	return s.data.Load().peerGen
 }
 
 // RebuildPeerMaps rebuilds the peer relationship map using the current [PeersFunc].
