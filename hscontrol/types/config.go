@@ -735,6 +735,16 @@ func validateServerConfigInto(v *configValidator) {
 	}
 
 	// Validate Noise connection health check parameters
+	for _, k := range []string{"noise.ping_after_idle", "noise.ping_timeout"} {
+		if d := viper.GetDuration(k); d < 0 {
+			v.Add(&ConfigError{
+				Reason:  k + " must not be negative",
+				Current: []KV{{k, d.String()}},
+				Hint:    "set a positive duration, or noise.ping_after_idle: 0 to disable the check",
+			})
+		}
+	}
+
 	if idle := viper.GetDuration("noise.ping_after_idle"); idle > 0 {
 		if idle < minNoisePingAfterIdle {
 			v.Add(&ConfigError{

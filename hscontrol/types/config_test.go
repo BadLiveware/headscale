@@ -966,6 +966,16 @@ func TestNoisePingConfig(t *testing.T) {
 			want:  NoiseConfig{PingAfterIdle: 0, PingTimeout: 20 * time.Second},
 		},
 		{
+			name:      "idle-negative",
+			noise:     "  ping_after_idle: -30s\n",
+			wantError: "noise.ping_after_idle must not be negative",
+		},
+		{
+			name:      "timeout-negative",
+			noise:     "  ping_timeout: -1s\n",
+			wantError: "noise.ping_timeout must not be negative",
+		},
+		{
 			name:      "idle-below-minimum",
 			noise:     "  ping_after_idle: 1s\n",
 			wantError: "noise.ping_after_idle is below the minimum",
