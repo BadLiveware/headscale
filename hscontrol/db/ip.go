@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/netip"
+	"slices"
 	"sync"
 
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -67,8 +68,10 @@ func NewIPAllocator(
 	}
 
 	var (
-		v4s []sql.NullString
-		v6s []sql.NullString
+		v4s    []sql.NullString
+		v6s    []sql.NullString
+		svcV4s []sql.NullString
+		svcV6s []sql.NullString
 	)
 
 	if db != nil {
@@ -84,6 +87,21 @@ func NewIPAllocator(
 		})
 		if err != nil {
 			return nil, fmt.Errorf("reading IPv6 addresses from database: %w", err)
+		}
+
+		// Service virtual IPs share the pool with node addresses.
+		err = db.Read(func(rx *gorm.DB) error {
+			return rx.Model(&types.Service{}).Pluck("ipv4", &svcV4s).Error
+		})
+		if err != nil {
+			return nil, fmt.Errorf("reading service IPv4 addresses from database: %w", err)
+		}
+
+		err = db.Read(func(rx *gorm.DB) error {
+			return rx.Model(&types.Service{}).Pluck("ipv6", &svcV6s).Error
+		})
+		if err != nil {
+			return nil, fmt.Errorf("reading service IPv6 addresses from database: %w", err)
 		}
 	}
 
@@ -112,7 +130,7 @@ func NewIPAllocator(
 
 	// Fetch all the IP Addresses currently handed out from the Database
 	// and add them to the used IP set.
-	for _, addrStr := range append(v4s, v6s...) {
+	for _, addrStr := range slices.Concat(v4s, v6s, svcV4s, svcV6s) {
 		if addrStr.Valid {
 			addr, err := netip.ParseAddr(addrStr.String)
 			if err != nil {
@@ -154,6 +172,10 @@ func (i *IPAllocator) Next() (*netip.Addr, *netip.Addr, error) {
 	if i.prefix6 != nil {
 		ret6, err = i.allocateNext(&i.prev6, i.prefix6)
 		if err != nil {
+			if ret4 != nil {
+				i.FreeIPs([]netip.Addr{*ret4})
+			}
+
 			return nil, nil, fmt.Errorf("allocating IPv6 address: %w", err)
 		}
 	}

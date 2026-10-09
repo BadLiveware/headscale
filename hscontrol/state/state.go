@@ -170,6 +170,10 @@ type State struct {
 	// claims caches the DNS records of node-claimed hostnames.
 	claims hostnameClaims
 
+	// services holds the virtual IP addresses of Tailscale Services and
+	// their active hosts.
+	services services
+
 	// policyReloaded holds the callbacks [State.ReloadPolicy] runs after it
 	// swapped the policy, see [State.OnPolicyReload].
 	policyReloaded   []func()
@@ -298,6 +302,19 @@ func NewState(cfg *types.Config) (*State, error) {
 		registerLocks: xsync.NewMap[key.MachinePublic, *sync.Mutex](),
 	}
 
+	s.services.startedAt = time.Now()
+
+	_, err = s.loadServiceVIPs()
+	if err != nil {
+		return nil, fmt.Errorf("loading service addresses: %w", err)
+	}
+
+	// The first peer maps were built before the service addresses were
+	// known; hosts are peers of the nodes that may reach their services.
+	if s.HasServiceVIPs() {
+		s.nodeStore.RebuildPeerMaps()
+	}
+
 	// Surface nodes whose stored data would break map generation (e.g. an
 	// invalid given name from a legacy row) so an operator can fix them. This
 	// only logs; it never mutates a node's stored name at boot.
@@ -367,6 +384,13 @@ func (s *State) ReloadPolicy() ([]change.Change, error) {
 	if err != nil {
 		return nil, fmt.Errorf("setting policy: %w", err)
 	}
+
+	servicesChanged, err := s.loadServiceVIPs()
+	if err != nil {
+		log.Error().Err(err).Msg("loading service addresses during policy reload")
+	}
+
+	policyChanged = policyChanged || servicesChanged
 
 	// Clear SSH check auth times when policy changes to ensure stale
 	// approvals don't persist if checkPeriod rules are modified or removed.
@@ -1135,7 +1159,8 @@ func (s *State) RenameNode(nodeID types.NodeID, newName string) (types.NodeView,
 
 	nodeView, c, err := s.persistNodeAndRefreshPolicy(view, genBefore)
 	if err != nil {
-		return nodeView, c, err
+		// The NodeStore already has the new name.
+		return nodeView, c.Merge(s.refreshHostnameClaims()), err
 	}
 
 	if c.IsEmpty() {
@@ -1143,7 +1168,8 @@ func (s *State) RenameNode(nodeID types.NodeID, newName string) (types.NodeView,
 		c = change.NodeAdded(nodeID)
 	}
 
-	return nodeView, c, nil
+	// A node name can hide or free the MagicDNS name of a service.
+	return nodeView, c.Merge(s.refreshHostnameClaims()), nil
 }
 
 // BackfillNodeIPs assigns IP addresses to nodes that don't have them. The
@@ -1320,6 +1346,13 @@ func (s *State) SetPolicy(pol []byte) (bool, error) {
 		return changed, err
 	}
 
+	servicesChanged, err := s.loadServiceVIPs()
+	if err != nil {
+		log.Error().Err(err).Msg("loading service addresses after a policy change")
+	}
+
+	changed = changed || servicesChanged
+
 	// Clear SSH check auth times when policy changes.
 	s.ClearSSHCheckAuth()
 
@@ -1435,6 +1468,8 @@ func (s *State) RoutesForPeer(
 			}
 		}
 	}
+
+	reduced = append(reduced, s.serviceRoutesForPeer(viewer, peer, matchers)...)
 
 	// Co-router visibility: when the viewer advertises the same prefix
 	// that the peer is HA primary for, the viewer must see that route
@@ -3125,6 +3160,15 @@ func (s *State) updatePolicyManagerUsers() (change.Change, error) {
 		// so peer visibility reflects the new policy. Without this, the
 		// cached peersByNode stays stale until the next node write.
 		s.nodeStore.RebuildPeerMaps()
+
+		// Claimed names and service hosts depend on who sees whom.
+		claims := s.refreshHostnameClaims()
+
+		if changed {
+			return change.PolicyChange().Merge(claims), nil
+		}
+
+		return claims, nil
 	}
 
 	if changed {
@@ -3157,12 +3201,16 @@ func (s *State) DrainSelfRefreshes() []change.Change {
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
 
-	cs := make([]change.Change, 0, len(ids))
+	s.reconcileServiceHosts()
+
+	moves := s.drainServiceMoves()
+
+	cs := make([]change.Change, 0, len(ids)+len(moves))
 	for _, id := range ids {
 		cs = append(cs, change.SelfUpdate(id))
 	}
 
-	return cs
+	return append(cs, moves...)
 }
 
 // updatePolicyManagerNodes refreshes the policy manager with current node
@@ -3187,6 +3235,8 @@ func (s *State) updatePolicyManagerNodes(genBefore uint64) (change.Change, error
 		// a change here means this snapshot raced another writer and moved
 		// the policy manager away from what adjacency was built with.
 		s.nodeStore.RebuildPeerMaps()
+
+		return s.policyChangeSince(genBefore).Merge(s.refreshHostnameClaims()), nil
 	}
 
 	return s.policyChangeSince(genBefore), nil

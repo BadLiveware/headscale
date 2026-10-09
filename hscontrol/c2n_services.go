@@ -85,7 +85,7 @@ func newServicesFetcher(h *Headscale) *servicesFetcher {
 }
 
 // syncAll runs [servicesFetcher.sync] for every node. A policy reload calls
-// it, because a policy that gains hostnameClaims rules makes the services
+// it, because a policy that gains hostnameClaims rules or services makes the services
 // of connected nodes matter, and no map request may come from them soon.
 func (f *servicesFetcher) syncAll() {
 	for _, node := range f.h.state.ListNodes().All() {
@@ -125,9 +125,10 @@ func (f *servicesFetcher) sync(nodeID types.NodeID) {
 		return
 	}
 
-	// Without a hostnameClaims rule the services cannot matter; a policy
-	// reload runs syncAll when that changes.
-	if !f.h.state.HostnameClaimsConfigured() {
+	// Without a hostnameClaims rule or a service in autoApprovers.services
+	// the services cannot matter; a policy reload runs syncAll when that
+	// changes.
+	if !f.h.state.AdvertisedServicesMatter() {
 		return
 	}
 

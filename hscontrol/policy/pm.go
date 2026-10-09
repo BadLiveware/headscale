@@ -72,6 +72,16 @@ type PolicyManager interface {
 	// rule.
 	HasHostnameClaims() bool
 
+	// ServiceNames returns the services defined in autoApprovers.services.
+	ServiceNames() []tailcfg.ServiceName
+
+	// SetServiceVIPs sets the virtual IP addresses of the services and
+	// reports whether nodes need an update.
+	SetServiceVIPs(vips map[tailcfg.ServiceName][]netip.Addr) (bool, error)
+
+	// NodeServices returns the services node may host.
+	NodeServices(node types.NodeView) []tailcfg.ServiceName
+
 	// ViaRoutesForPeer computes via grant effects for a viewer-peer pair.
 	// It returns which routes should be included (peer is via-designated for viewer)
 	// and excluded (steered to a different peer). When no via grants apply,

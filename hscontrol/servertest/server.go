@@ -50,6 +50,7 @@ type serverConfig struct {
 	magicDNSDomain   string
 	dnsResolvers     []string
 	noise            types.NoiseConfig
+	services         types.ServicesConfig
 }
 
 func defaultServerConfig() *serverConfig {
@@ -110,6 +111,13 @@ func WithTaildropEnabled(enabled bool) ServerOption {
 // [tailcfg.DNSConfig].
 func WithMagicDNS(domain string) ServerOption {
 	return func(c *serverConfig) { c.magicDNSDomain = domain }
+}
+
+// WithServices sets how clients of Tailscale Services are assigned to
+// hosts. The default is the zero value: no startup grace and no rebalance,
+// so a client keeps its host until that host leaves.
+func WithServices(cfg types.ServicesConfig) ServerOption {
+	return func(c *serverConfig) { c.services = cfg }
 }
 
 // WithDNSResolvers sets the global DNS resolvers, so map responses carry a
@@ -173,6 +181,7 @@ func NewServer(tb testing.TB, opts ...ServerOption) *TestServer {
 		Policy: types.PolicyConfig{
 			Mode: types.PolicyModeDB,
 		},
+		Services: sc.services,
 		Taildrop: types.TaildropConfig{Enabled: sc.taildropEnabled},
 		LogTail:  types.LogTailConfig{Enabled: sc.logTailEnabled},
 		Tuning: types.Tuning{

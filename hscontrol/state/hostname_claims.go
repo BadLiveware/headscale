@@ -26,6 +26,11 @@ const (
 type claimRecord struct {
 	nodeID types.NodeID
 	record tailcfg.DNSRecord
+
+	// service is set when the record points at the virtual IP of a
+	// Tailscale Service; such a record is visible to the viewers the
+	// policy lets reach the service, and nodeID is zero.
+	service tailcfg.ServiceName
 }
 
 // hostnameClaims caches the records derived from node claims, so a map
@@ -116,10 +121,15 @@ func deriveClaimRecords(
 // or going offline, a node's advertised services, tags or addresses, a
 // node's deletion, and a policy change.
 func (s *State) refreshHostnameClaims() change.Change {
+	s.refreshServiceHosts()
+
 	s.claims.mu.Lock()
 	defer s.claims.mu.Unlock()
 
-	next, shadowed := deriveClaimRecords(s.nodeStore.ListNodes(), s.polMan.ServiceHostnames, s.cfg.BaseDomain)
+	nodes := s.nodeStore.ListNodes()
+
+	claimed, shadowed := deriveClaimRecords(nodes, s.polMan.ServiceHostnames, s.cfg.BaseDomain)
+	next := s.withServiceRecords(claimed, nodes)
 
 	for _, name := range shadowed {
 		if _, done := s.claims.warned[name]; done {
@@ -193,10 +203,19 @@ func (s *State) HostnameClaimRecords(viewer types.NodeID) []tailcfg.DNSRecord {
 	}
 
 	peers := s.nodeStore.ListPeerIDs(viewer)
+	mayReach := s.serviceAccessFunc(viewer)
 
 	var visible []claimRecord
 
 	for _, r := range *all {
+		if r.service != "" {
+			if mayReach(r.service) {
+				visible = append(visible, r)
+			}
+
+			continue
+		}
+
 		_, isPeer := slices.BinarySearch(peers, r.nodeID)
 		if r.nodeID != viewer && !isPeer {
 			continue
@@ -267,10 +286,11 @@ func (s *State) SetNodeAdvertisedServices(
 	return s.refreshHostnameClaims(), nil
 }
 
-// HostnameClaimsConfigured reports whether the policy has any hostnameClaims
-// rule. Without one, the services a node advertises cannot matter.
-func (s *State) HostnameClaimsConfigured() bool {
-	return s.polMan.HasHostnameClaims()
+// AdvertisedServicesMatter reports whether the policy has any
+// hostnameClaims rule or defines any service in autoApprovers.services.
+// Without either, the services a node advertises cannot matter.
+func (s *State) AdvertisedServicesMatter() bool {
+	return s.polMan.HasHostnameClaims() || len(s.polMan.ServiceNames()) > 0
 }
 
 // OnPolicyReload registers fn to run after every policy reload, once the

@@ -209,6 +209,30 @@ node:
       # Must be >= 1s and less than probe_interval.
       probe_timeout: 5s
 
+# Tailscale Services with virtual IPs (VIPs): how clients are assigned to the
+# hosts of a service. A client sends all its traffic for a VIP to one host, and
+# moving a client to another host resets its open connections to the service.
+# So a client keeps its host while that host is up; the clients of a host that
+# leaves move at once; a host that joins gets clients by a slow rebalance.
+services:
+  # For this long after Headscale starts, every client follows its preferred
+  # (rendezvous) host at once. Assignments are kept in memory only; without the
+  # grace, the first host to reconnect after a restart would keep every client.
+  startup_grace: 60s
+
+  rebalance:
+    # How often clients are moved towards their preferred host. 0 disables
+    # the rebalance: clients then only move when their host leaves.
+    interval: 10s
+
+    # At most this many clients are taken from one host per minute; each move
+    # resets one client's connections to that host.
+    moves_per_host_per_minute: 12
+
+    # Stop moving clients when every host is within this fraction of its
+    # preferred share.
+    tolerance: 0.1
+
 database:
   # Database type. Available options: sqlite, postgres
   # Please note that using Postgres is highly discouraged as it is only supported for legacy reasons.
