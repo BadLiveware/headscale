@@ -1074,7 +1074,7 @@ func (s *State) SetNodeTags(nodeID types.NodeID, tags []string) (types.NodeView,
 	// Setting OriginNode ensures the node gets a self-update with the new tags.
 	c.OriginNode = nodeID
 
-	return nodeView, c, nil
+	return nodeView, c.Merge(s.refreshHostnameClaims()), nil
 }
 
 // SetApprovedRoutes sets the network routes that a node is approved to advertise.
