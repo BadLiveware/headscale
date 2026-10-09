@@ -29,6 +29,11 @@ const (
 	PKCEMethodS256  string = "S256"
 
 	defaultNodeStoreBatchSize = 100
+
+	// minNoisePingAfterIdle keeps the Noise PING check from waking idle
+	// clients, often phones on battery, more often than every few seconds.
+	minNoisePingAfterIdle = 5 * time.Second
+	minNoisePingTimeout   = 1 * time.Second
 )
 
 var (
@@ -63,6 +68,19 @@ type EphemeralConfig struct {
 	// InactivityTimeout is how long an ephemeral node can be offline
 	// before it is automatically deleted.
 	InactivityTimeout time.Duration
+}
+
+// NoiseConfig contains the health check settings of the Noise (ts2021)
+// control connection that every node keeps open.
+type NoiseConfig struct {
+	// PingAfterIdle is how long Headscale waits without reading anything
+	// from a node's connection before it sends an HTTP/2 PING frame.
+	// Zero disables the check.
+	PingAfterIdle time.Duration
+
+	// PingTimeout is how long Headscale waits for the answer to a PING
+	// before it closes the connection; the node then goes offline.
+	PingTimeout time.Duration
 }
 
 // HARouteConfig contains configuration for HA subnet router health probing.
@@ -117,6 +135,7 @@ type Config struct {
 	PrefixV6            *netip.Prefix
 	IPAllocation        IPAllocationStrategy
 	NoisePrivateKeyPath string
+	Noise               NoiseConfig
 	BaseDomain          string
 	Log                 LogConfig
 	DisableUpdateCheck  bool
@@ -484,6 +503,9 @@ func LoadConfig(path string, isFile bool) error {
 	viper.SetDefault("node.expiry", "0")
 	viper.SetDefault("node.ephemeral.inactivity_timeout", "120s")
 	viper.SetDefault("preauth_keys.revoked_retention", "168h")
+	viper.SetDefault("noise.ping_after_idle", "30s")
+	viper.SetDefault("noise.ping_timeout", "20s")
+
 	viper.SetDefault("node.routes.ha.probe_interval", "10s")
 	viper.SetDefault("node.routes.ha.probe_timeout", "5s")
 
@@ -708,6 +730,37 @@ func validateServerConfigInto(v *configValidator) {
 				},
 				Hint: "list at least one upstream nameserver, or set dns.override_local_dns: false",
 				See:  "https://headscale.net/stable/ref/dns/",
+			})
+		}
+	}
+
+	// Validate Noise connection health check parameters
+	for _, k := range []string{"noise.ping_after_idle", "noise.ping_timeout"} {
+		if d := viper.GetDuration(k); d < 0 {
+			v.Add(&ConfigError{
+				Reason:  k + " must not be negative",
+				Current: []KV{{k, d.String()}},
+				Hint:    "set a positive duration, or noise.ping_after_idle: 0 to disable the check",
+			})
+		}
+	}
+
+	if idle := viper.GetDuration("noise.ping_after_idle"); idle > 0 {
+		if idle < minNoisePingAfterIdle {
+			v.Add(&ConfigError{
+				Reason:  "noise.ping_after_idle is below the minimum",
+				Current: []KV{{"noise.ping_after_idle", idle.String()}},
+				Minimum: minNoisePingAfterIdle.String(),
+				Hint:    "raise the value to at least the minimum, or set 0 to disable the check",
+			})
+		}
+
+		if timeout := viper.GetDuration("noise.ping_timeout"); timeout < minNoisePingTimeout {
+			v.Add(&ConfigError{
+				Reason:  "noise.ping_timeout is below the minimum",
+				Current: []KV{{"noise.ping_timeout", timeout.String()}},
+				Minimum: minNoisePingTimeout.String(),
+				Hint:    "raise the value to at least the minimum",
 			})
 		}
 	}
@@ -1394,6 +1447,10 @@ func LoadServerConfig() (*Config, error) {
 		NoisePrivateKeyPath: util.AbsolutePathFromConfigPath(
 			viper.GetString("noise.private_key_path"),
 		),
+		Noise: NoiseConfig{
+			PingAfterIdle: viper.GetDuration("noise.ping_after_idle"),
+			PingTimeout:   viper.GetDuration("noise.ping_timeout"),
+		},
 		BaseDomain: dnsConfig.BaseDomain,
 
 		DERP: derpConfig,

@@ -3,8 +3,10 @@ package servertest
 import (
 	"context"
 	"fmt"
+	"net"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,6 +58,9 @@ type TestClient struct {
 	bus     *eventbus.Bus
 	dialer  *tsdial.Dialer
 	tracker *health.Tracker
+
+	// cut black-holes every connection of the client, see [TestClient.CutNetwork].
+	cut *atomic.Bool
 }
 
 // ClientOption configures a [TestClient].
@@ -139,7 +144,16 @@ func NewClient(tb testing.TB, server *TestServer, name string, opts ...ClientOpt
 
 	// Route all connections through the server's in-memory network
 	// so that no real TCP sockets are used.
-	dialer.SetSystemDialerForTest(server.MemNet().Dial)
+	cut := new(atomic.Bool)
+
+	dialer.SetSystemDialerForTest(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := server.MemNet().Dial(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+
+		return &cuttableConn{Conn: conn, cut: cut}, nil
+	})
 
 	machineKey := key.NewMachine()
 
@@ -172,6 +186,7 @@ func NewClient(tb testing.TB, server *TestServer, name string, opts ...ClientOpt
 		bus:     bus,
 		dialer:  dialer,
 		tracker: tracker,
+		cut:     cut,
 
 		deltaUpdates: cc.deltaUpdates,
 	}
@@ -647,4 +662,39 @@ func (c *TestClient) String() string {
 	}
 
 	return fmt.Sprintf("TestClient(%s, %d peers)", c.Name, len(nm.Peers))
+}
+
+// CutNetwork black-holes the client's connections to the server without
+// closing them, as a lost network path does: the client's writes vanish and
+// nothing more reaches it. The client process keeps running.
+func (c *TestClient) CutNetwork() {
+	c.cut.Store(true)
+}
+
+// cuttableConn is a [net.Conn] that silently drops all traffic in both
+// directions once cut is set.
+type cuttableConn struct {
+	net.Conn
+
+	cut *atomic.Bool
+}
+
+// Read discards what arrives after the cut and keeps waiting, so the
+// caller sees a silent peer until the connection is closed.
+func (c *cuttableConn) Read(b []byte) (int, error) {
+	for {
+		n, err := c.Conn.Read(b)
+		if err != nil || !c.cut.Load() {
+			return n, err
+		}
+	}
+}
+
+// Write reports success but sends nothing after the cut.
+func (c *cuttableConn) Write(b []byte) (int, error) {
+	if c.cut.Load() {
+		return len(b), nil
+	}
+
+	return c.Conn.Write(b)
 }

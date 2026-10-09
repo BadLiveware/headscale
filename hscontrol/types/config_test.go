@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -488,6 +489,8 @@ func TestOIDCConfigValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			viper.Reset()
+
 			tmpDir := t.TempDir()
 			configYaml := []byte(`---
 noise:
@@ -938,5 +941,87 @@ func TestExtraRecordsAreLowercased(t *testing.T) {
 
 	if diff := cmp.Diff(want, cfg.TailcfgDNSConfig.ExtraRecords); diff != "" {
 		t.Errorf("SetExtraRecords mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestNoisePingConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		noise     string
+		want      NoiseConfig
+		wantError string
+	}{
+		{
+			name: "defaults",
+			want: NoiseConfig{PingAfterIdle: 30 * time.Second, PingTimeout: 20 * time.Second},
+		},
+		{
+			name:  "custom",
+			noise: "  ping_after_idle: 1m\n  ping_timeout: 5s\n",
+			want:  NoiseConfig{PingAfterIdle: time.Minute, PingTimeout: 5 * time.Second},
+		},
+		{
+			name:  "disabled",
+			noise: "  ping_after_idle: 0s\n",
+			want:  NoiseConfig{PingAfterIdle: 0, PingTimeout: 20 * time.Second},
+		},
+		{
+			name:      "idle-negative",
+			noise:     "  ping_after_idle: -30s\n",
+			wantError: "noise.ping_after_idle must not be negative",
+		},
+		{
+			name:      "timeout-negative",
+			noise:     "  ping_timeout: -1s\n",
+			wantError: "noise.ping_timeout must not be negative",
+		},
+		{
+			name:      "idle-below-minimum",
+			noise:     "  ping_after_idle: 1s\n",
+			wantError: "noise.ping_after_idle is below the minimum",
+		},
+		{
+			name:      "timeout-below-minimum",
+			noise:     "  ping_timeout: 100ms\n",
+			wantError: "noise.ping_timeout is below the minimum",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			viper.Reset()
+
+			tmpDir := t.TempDir()
+			configYaml := `---
+server_url: https://example.com
+prefixes:
+  v4: 100.64.0.0/10
+noise:
+  private_key_path: noise_private.key
+` + tt.noise + `database:
+  type: sqlite3
+dns:
+  magic_dns: false
+  override_local_dns: false
+`
+
+			err := os.WriteFile(filepath.Join(tmpDir, "config.yaml"), []byte(configYaml), 0o600)
+			require.NoError(t, err)
+
+			err = LoadConfig(tmpDir, false)
+			require.NoError(t, err)
+
+			err = validateServerConfig()
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				return
+			}
+
+			require.NoError(t, err)
+
+			cfg, err := LoadServerConfig()
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.Noise)
+		})
 	}
 }
