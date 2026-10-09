@@ -24,7 +24,7 @@ const hostnameClaimsPolicy = `{
 	}
 }`
 
-const claimedName = "cca.gw.example.com"
+const claimedName = "grafana.gw.example.com"
 
 // claimedAddrs returns the addresses nm's DNS config gives name.
 func claimedAddrs(nm *netmap.NetworkMap, name string) []netip.Addr {
@@ -92,7 +92,7 @@ func TestHostnameClaims(t *testing.T) {
 		c.WaitForPeers(t, 3, 10*time.Second)
 	}
 
-	svc := tailcfg.ServiceName("svc:cca")
+	svc := tailcfg.ServiceName("svc:grafana")
 
 	gw1.AdvertiseServices(t, svc)
 	gw2.AdvertiseServices(t, svc)
@@ -133,7 +133,7 @@ func TestHostnameClaimsFollowVisibility(t *testing.T) {
 	gw.WaitForPeers(t, 1, 10*time.Second)
 	viewer.WaitForPeers(t, 1, 10*time.Second)
 
-	gw.AdvertiseServices(t, "svc:cca")
+	gw.AdvertiseServices(t, "svc:grafana")
 	waitForClaim(t, viewer, selfAddrs(t, gw), "viewer sees the claim")
 
 	// Only tagged nodes may talk to each other: viewer loses gw as a peer.
@@ -165,7 +165,7 @@ func lastClaimSetup(t *testing.T) (*servertest.TestServer, *servertest.TestClien
 	gw.WaitForPeers(t, 1, 10*time.Second)
 	viewer.WaitForPeers(t, 1, 10*time.Second)
 
-	gw.AdvertiseServices(t, "svc:cca")
+	gw.AdvertiseServices(t, "svc:grafana")
 	waitForClaim(t, viewer, selfAddrs(t, gw), "viewer sees the claim")
 	waitForClaim(t, gw, selfAddrs(t, gw), "gw sees its own claim")
 

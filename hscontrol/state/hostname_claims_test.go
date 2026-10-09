@@ -46,22 +46,22 @@ func TestDeriveClaimRecords(t *testing.T) {
 	}
 
 	nodes := views.SliceOf([]types.NodeView{
-		node(3, true, "100.64.0.3", "fd7a:115c:a1e0::3", "svc:cca"),
-		node(1, true, "100.64.0.1", "fd7a:115c:a1e0::1", "svc:cca"),
-		node(2, false, "100.64.0.2", "", "svc:cca"),
+		node(3, true, "100.64.0.3", "fd7a:115c:a1e0::3", "svc:grafana"),
+		node(1, true, "100.64.0.1", "fd7a:115c:a1e0::1", "svc:grafana"),
+		node(2, false, "100.64.0.2", "", "svc:grafana"),
 		node(4, true, "100.64.0.4", "", "svc:web"),
 		node(5, true, "100.64.0.5", ""),
 	})
 
 	got, shadowed := deriveClaimRecords(nodes, claimAll, "headscale.net")
 
-	assert.Equal(t, []string{"cca.headscale.net", "cca.headscale.net", "web.headscale.net"}, shadowed)
+	assert.Equal(t, []string{"grafana.headscale.net", "grafana.headscale.net", "web.headscale.net"}, shadowed)
 
 	want := []claimRecord{
-		{nodeID: 1, record: tailcfg.DNSRecord{Name: "cca.gw.example.com", Type: "A", Value: "100.64.0.1"}},
-		{nodeID: 3, record: tailcfg.DNSRecord{Name: "cca.gw.example.com", Type: "A", Value: "100.64.0.3"}},
-		{nodeID: 1, record: tailcfg.DNSRecord{Name: "cca.gw.example.com", Type: "AAAA", Value: "fd7a:115c:a1e0::1"}},
-		{nodeID: 3, record: tailcfg.DNSRecord{Name: "cca.gw.example.com", Type: "AAAA", Value: "fd7a:115c:a1e0::3"}},
+		{nodeID: 1, record: tailcfg.DNSRecord{Name: "grafana.gw.example.com", Type: "A", Value: "100.64.0.1"}},
+		{nodeID: 3, record: tailcfg.DNSRecord{Name: "grafana.gw.example.com", Type: "A", Value: "100.64.0.3"}},
+		{nodeID: 1, record: tailcfg.DNSRecord{Name: "grafana.gw.example.com", Type: "AAAA", Value: "fd7a:115c:a1e0::1"}},
+		{nodeID: 3, record: tailcfg.DNSRecord{Name: "grafana.gw.example.com", Type: "AAAA", Value: "fd7a:115c:a1e0::3"}},
 		{nodeID: 4, record: tailcfg.DNSRecord{Name: "web.gw.example.com", Type: "A", Value: "100.64.0.4"}},
 	}
 
@@ -69,7 +69,7 @@ func TestDeriveClaimRecords(t *testing.T) {
 }
 
 func TestOrderClaimRecordsForViewer(t *testing.T) {
-	const name = "cca.gw.example.com"
+	const name = "grafana.gw.example.com"
 
 	recordsFor := func(nodes ...types.NodeID) []claimRecord {
 		records := make([]claimRecord, 0, 2*len(nodes))
