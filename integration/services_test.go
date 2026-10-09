@@ -87,6 +87,11 @@ func TestServiceVIPs(t *testing.T) {
 		hsic.WithTestName("servicevips"),
 		hsic.WithConfigEnv(map[string]string{
 			"HEADSCALE_DNS_NAMESERVERS_GLOBAL": "",
+			// Clients follow rendezvous at once during the startup
+			// grace. This test checks what stock clients do with the
+			// VIPs; the sticky assignment and its rebalance are covered
+			// by servertest (TestServiceStickyRebalance).
+			"HEADSCALE_SERVICES_STARTUP_GRACE": "1h",
 		}),
 	)
 	requireNoErrHeadscaleEnv(t, err)

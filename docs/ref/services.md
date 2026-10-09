@@ -69,26 +69,54 @@ tailscale serve advertise svc:cca  # host again
 Clients reach the service at `<label>.<dns.base_domain>`, for example `cca.example.com`, or at the VIPs.
 Only clients that the policy lets reach the service get the name and the route to the VIPs.
 When a node's MagicDNS name uses the same label, the node keeps the name and the service is reachable at its VIPs.
-A [node-claimed hostname](dns.md#node-claimed-hostnames) of the service still answers with the addresses of the
-claiming nodes, not with the VIPs.
-Use it where open connections must survive a drain: a client keeps the address it connected to, while a VIP move takes all
-of the client's connections at once.
 
 Tailscale v1.94 and later route to a service without options.
 Linux clients from v1.86 to v1.93 need `--accept-routes`.
 
+## VIPs or claimed names
+
+A service can have both a VIP name and [node-claimed hostnames](dns.md#node-claimed-hostnames).
+They behave differently when a host stops hosting the service:
+
+- **A VIP move resets open connections.**
+  A client sends all its traffic for a VIP to one host.
+  When Headscale moves the client to another host, all the client's open connections to the service break at once,
+  and the client has to reconnect.
+- **A claimed name drains gracefully.**
+  A node-claimed hostname answers with the addresses of the claiming hosts, also when the service has VIPs.
+  When a host withdraws its claim, new connections go to another host after the client's DNS cache expires, and the
+  connections that are open keep their address and finish on the old host.
+
+Use claimed names for services that must drain without resetting connections, for example the replicas of a load
+balancer.
+Use the VIP name for clients that need one fixed address.
+
 ## How Headscale picks a host
 
-A Tailscale client sends all traffic for a VIP to one peer, so Headscale puts the VIPs on exactly one host in each
-client's network map:
+Headscale puts the VIPs on exactly one host in each client's network map:
 
-- Each client gets its own host, chosen by rendezvous hashing over the online hosts that advertise the service, so the
-  clients spread evenly over the hosts and a client keeps its host while that host is up.
-- When a host drains, the clients of that host move to their next host within about a second.
+- A new client gets the host that rendezvous hashing prefers for it among the online hosts that advertise the service,
+  so new clients spread evenly over the hosts.
+- A client keeps its host while that host is up, because a move resets its open connections.
+- When a host drains or goes offline, its clients move at once to their preferred remaining host.
+  A drain takes effect within about a second; a clean stop after about 10 seconds, when Headscale marks the host offline.
   Other clients do not change.
-- When a host goes offline, Headscale moves its clients after it marks the host offline, about 10 seconds after a clean
-  stop.
-- When a host starts to host the service, it takes its share of the clients from the other hosts.
-- A move takes all of a client's connections to the service with it: connections that were open to the old host break,
-  and the client has to reconnect.
+- When a host starts to host the service, it takes no clients at once.
+  A rebalance then moves clients to it gradually, at most `services.rebalance.moves_per_host_per_minute` clients from each
+  other host per minute, until every host is within `services.rebalance.tolerance` of its preferred share.
+- Headscale keeps the assignments in memory.
+  For `services.startup_grace` after Headscale starts, clients follow their preferred host at once, so the hosts that
+  reconnect one after another after a restart share the clients instead of the first host keeping all of them.
 - When Headscale is unreachable, clients keep their host, and there is no failover until Headscale is back.
+
+```yaml title="config.yaml"
+services:
+  startup_grace: 60s
+  rebalance:
+    interval: 10s                 # 0 disables the rebalance
+    moves_per_host_per_minute: 12 # each move resets one client's connections
+    tolerance: 0.1
+```
+
+With the defaults, a host loses at most one client to the rebalance every 5 seconds.
+For example, with 1200 clients on 3 hosts, a fourth host gets its share of about 300 clients in about 7 to 8 minutes.
