@@ -126,14 +126,14 @@ The `hostnameClaims` section of the [policy](policy.md) states which tags may cl
 ```json title="policy.json"
 {
   "tagOwners": {
-    "tag:gateway": ["alice@"],
-    "tag:monitoring": ["alice@"]
+    "tag:services": ["alice@"],
+    "tag:grafana": ["alice@"]
   },
   "hostnameClaims": {
-    // A node tagged tag:gateway that advertises svc:<label> answers at <label>.gw.example.com.
-    "*.gw.example.com": ["tag:gateway"],
+    // A node tagged tag:services that advertises svc:<label> answers at <label>.svc.example.com.
+    "*.svc.example.com": ["tag:services"],
     // Only the label "grafana" may be claimed here.
-    "grafana.example.com": ["tag:monitoring"]
+    "grafana.example.com": ["tag:grafana"]
   }
 }
 ```
@@ -143,8 +143,8 @@ hostname.
 A node withdraws its claim when it stops advertising the service:
 
 ```console
-tailscale serve advertise svc:cca  # claims cca.gw.example.com
-tailscale serve drain svc:cca      # withdraws the claim
+tailscale serve advertise svc:grafana  # a tag:grafana node claims grafana.example.com
+tailscale serve drain svc:grafana      # withdraws the claim
 ```
 
 A [tsnet](https://tailscale.com/docs/features/tsnet) program sets the `AdvertiseServices` preference through its local
@@ -165,25 +165,25 @@ client instead.
 ### Scope each name to its own tag
 
 Any node with an allowed tag can claim any name its pattern matches.
-With `"*.gw.example.com": ["tag:gateway"]`, every `tag:gateway` node can add itself to every name in the zone, so a
+With `"*.svc.example.com": ["tag:services"]`, every `tag:services` node can add itself to every name in the zone, so a
 misconfigured or compromised node can take traffic for a service it does not run.
-Headscale has no first-come ownership of a name: all nodes that claim it are answered.
+Headscale has no first-come ownership of a name: it publishes every node that claims it.
 
 Where this matters, give each service its own tag and an exact pattern:
 
 ```json title="policy.json"
 {
   "tagOwners": {
-    "tag:gw-cca": ["alice@"],
-    "tag:gw-billing": ["alice@"]
+    "tag:grafana": ["alice@"],
+    "tag:gitea": ["alice@"]
   },
   "hostnameClaims": {
-    "cca.gw.example.com": ["tag:gw-cca"],
-    "billing.gw.example.com": ["tag:gw-billing"]
+    "grafana.example.com": ["tag:grafana"],
+    "gitea.example.com": ["tag:gitea"]
   }
 }
 ```
 
 Register the nodes of each service with a pre-auth key for its tag, for example
-`headscale preauthkeys create --tags tag:gw-cca`.
-A node tagged `tag:gw-billing` that advertises `svc:cca` then claims nothing.
+`headscale preauthkeys create --tags tag:grafana`.
+A node tagged `tag:gitea` that advertises `svc:grafana` then claims nothing.
