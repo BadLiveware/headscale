@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/juanfont/headscale/hscontrol/servertest"
+	"github.com/juanfont/headscale/hscontrol/types"
+	"github.com/stretchr/testify/require"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/netmap"
 )
@@ -146,4 +148,70 @@ func TestHostnameClaimsFollowVisibility(t *testing.T) {
 
 	waitForClaim(t, viewer, nil, "viewer no longer gets the claim of a node it cannot see")
 	waitForClaim(t, gw, selfAddrs(t, gw), "gw still sees its own claim")
+}
+
+// lastClaimSetup starts a server with one claiming gateway and a viewer
+// that sees its claim.
+func lastClaimSetup(t *testing.T) (*servertest.TestServer, *servertest.TestClient, *servertest.TestClient) {
+	t.Helper()
+
+	srv := servertest.NewServer(t, servertest.WithMagicDNS("headscale.net"))
+	user := srv.CreateUser(t, "claims-user")
+	reloadPolicy(t, srv, hostnameClaimsPolicy)
+
+	gw := servertest.NewClient(t, srv, "gw", servertest.WithUser(user), servertest.WithTags("tag:gateway"))
+	viewer := servertest.NewClient(t, srv, "viewer", servertest.WithUser(user))
+
+	gw.WaitForPeers(t, 1, 10*time.Second)
+	viewer.WaitForPeers(t, 1, 10*time.Second)
+
+	gw.AdvertiseServices(t, "svc:cca")
+	waitForClaim(t, viewer, selfAddrs(t, gw), "viewer sees the claim")
+	waitForClaim(t, gw, selfAddrs(t, gw), "gw sees its own claim")
+
+	return srv, gw, viewer
+}
+
+// TestHostnameClaimsLastClaimRemovedByTagChange checks that when the only
+// claiming node loses the authorised tag, every client drops the record,
+// the node itself included. The tag change reaches clients as a policy
+// change, and no claim is left afterwards.
+func TestHostnameClaimsLastClaimRemovedByTagChange(t *testing.T) {
+	t.Parallel()
+
+	srv, gw, viewer := lastClaimSetup(t)
+
+	id := types.NodeID(gw.Netmap().SelfNode.ID()) //nolint:gosec // test node IDs are small
+
+	_, c, err := srv.State().SetNodeTags(id, []string{"tag:rogue"})
+	require.NoError(t, err)
+	srv.App.Change(c)
+
+	waitForClaim(t, viewer, nil, "viewer drops the claim after gw loses its tag")
+	waitForClaim(t, gw, nil, "gw drops its own claim after it loses its tag")
+
+	// Getting the tag back restores the claim, for the node itself too.
+	_, c, err = srv.State().SetNodeTags(id, []string{"tag:gateway"})
+	require.NoError(t, err)
+	srv.App.Change(c)
+
+	waitForClaim(t, viewer, selfAddrs(t, gw), "viewer sees the claim again")
+	waitForClaim(t, gw, selfAddrs(t, gw), "gw sees its own claim again")
+}
+
+// TestHostnameClaimsLastClaimRemovedByExpiry checks that when the only
+// claiming node's key expires, clients drop its record.
+func TestHostnameClaimsLastClaimRemovedByExpiry(t *testing.T) {
+	t.Parallel()
+
+	srv, gw, viewer := lastClaimSetup(t)
+
+	id := types.NodeID(gw.Netmap().SelfNode.ID()) //nolint:gosec // test node IDs are small
+	expired := time.Now().Add(-time.Minute)
+
+	_, c, err := srv.State().SetNodeExpiry(id, &expired)
+	require.NoError(t, err)
+	srv.App.Change(c)
+
+	waitForClaim(t, viewer, nil, "viewer drops the claim of the expired node")
 }

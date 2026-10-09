@@ -174,6 +174,11 @@ type State struct {
 	// their active hosts.
 	services services
 
+	// policyReloaded holds the callbacks [State.ReloadPolicy] runs after it
+	// swapped the policy, see [State.OnPolicyReload].
+	policyReloaded   []func()
+	policyReloadedMu sync.Mutex
+
 	// sshCheckAuth tracks when source nodes last completed SSH check auth.
 	//
 	// For rules without explicit checkPeriod (default 12h), auth covers any
@@ -386,6 +391,8 @@ func (s *State) ReloadPolicy() ([]change.Change, error) {
 	// Clear SSH check auth times when policy changes to ensure stale
 	// approvals don't persist if checkPeriod rules are modified or removed.
 	s.ClearSSHCheckAuth()
+
+	defer s.runPolicyReloaded()
 
 	// Rebuild peer maps after policy changes because the peersFunc in [NodeStore]
 	// uses the [policy.PolicyManager]'s filters. Without this, nodes won't see
@@ -1047,7 +1054,8 @@ func (s *State) SetNodeTags(nodeID types.NodeID, tags []string) (types.NodeView,
 
 	nodeView, c, err := s.persistNodeAndRefreshPolicy(n, genBefore)
 	if err != nil {
-		return nodeView, c, err
+		// The NodeStore already holds the new tags; claims follow them.
+		return nodeView, c.Merge(s.refreshHostnameClaims()), err
 	}
 
 	if c.IsEmpty() {

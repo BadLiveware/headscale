@@ -68,6 +68,10 @@ type PolicyManager interface {
 	// hostnameClaims section.
 	ServiceHostnames(node types.NodeView, services []string) []string
 
+	// HasHostnameClaims reports whether the policy has any hostnameClaims
+	// rule.
+	HasHostnameClaims() bool
+
 	// ServiceNames returns the services defined in autoApprovers.services.
 	ServiceNames() []tailcfg.ServiceName
 

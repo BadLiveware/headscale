@@ -53,7 +53,9 @@ func TestDeriveClaimRecords(t *testing.T) {
 		node(5, true, "100.64.0.5", ""),
 	})
 
-	got := deriveClaimRecords(nodes, claimAll, "headscale.net")
+	got, shadowed := deriveClaimRecords(nodes, claimAll, "headscale.net")
+
+	assert.Equal(t, []string{"cca.headscale.net", "cca.headscale.net", "web.headscale.net"}, shadowed)
 
 	want := []claimRecord{
 		{nodeID: 1, record: tailcfg.DNSRecord{Name: "cca.gw.example.com", Type: "A", Value: "100.64.0.1"}},
