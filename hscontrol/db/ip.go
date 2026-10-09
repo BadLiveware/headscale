@@ -172,6 +172,10 @@ func (i *IPAllocator) Next() (*netip.Addr, *netip.Addr, error) {
 	if i.prefix6 != nil {
 		ret6, err = i.allocateNext(&i.prev6, i.prefix6)
 		if err != nil {
+			if ret4 != nil {
+				i.FreeIPs([]netip.Addr{*ret4})
+			}
+
 			return nil, nil, fmt.Errorf("allocating IPv6 address: %w", err)
 		}
 	}

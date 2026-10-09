@@ -1159,7 +1159,8 @@ func (s *State) RenameNode(nodeID types.NodeID, newName string) (types.NodeView,
 
 	nodeView, c, err := s.persistNodeAndRefreshPolicy(view, genBefore)
 	if err != nil {
-		return nodeView, c, err
+		// The NodeStore already has the new name.
+		return nodeView, c.Merge(s.refreshHostnameClaims()), err
 	}
 
 	if c.IsEmpty() {

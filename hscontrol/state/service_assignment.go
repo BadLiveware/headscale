@@ -152,22 +152,27 @@ func planRebalance(clients []serviceClient, budget func(types.NodeID) int, toler
 // credit make one move.
 const rebalanceCreditEpsilon = 1e-9
 
+// rebalanceCarryLimit caps the credit a host carries into the next round
+// below one move: the fraction carries over, unused whole moves do not. It
+// stays clear of rebalanceCreditEpsilon, so a full carry never rounds up
+// to an extra move.
+const rebalanceCarryLimit = 1 - 1e-6
+
 // rebalanceBudget adds one round of credit to every active host and
 // returns how many whole moves each host may give up this round. The rate
-// is moves_per_host_per_minute × interval, and the fraction carries over
-// between rounds, so a short interval does not exceed the configured rate.
-// The credit is capped at one round (at least one move), so a host does
-// not save up a burst while nothing needs moving.
+// is moves_per_host_per_minute × interval. The fraction of a move carries
+// over between rounds, so the configured rate holds for any interval;
+// unused whole moves do not, so a host does not save up a burst while
+// nothing needs moving.
 func (sv *services) rebalanceBudget(
 	cfg types.ServicesRebalanceConfig,
 	hosts map[types.NodeID][]tailcfg.ServiceName,
 ) func(types.NodeID) int {
 	perRound := float64(cfg.MovesPerHostPerMinute) * cfg.Interval.Minutes()
-	limit := math.Max(1, perRound)
 
 	credit := make(map[types.NodeID]float64, len(hosts))
 	for h := range hosts {
-		credit[h] = math.Min(limit, sv.credit[h]+perRound)
+		credit[h] = math.Min(sv.credit[h], rebalanceCarryLimit) + perRound
 	}
 
 	sv.credit = credit

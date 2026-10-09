@@ -626,8 +626,16 @@ type vipViewMark struct {
 
 func snapshotVIPViews(clients []*servertest.TestClient, vips []netip.Addr) map[string]vipViewMark {
 	marks := make(map[string]vipViewMark, len(clients))
+
 	for _, c := range clients {
-		marks[c.Name] = vipViewMark{view: vipView(c.Netmap(), vips), seen: c.UpdateCount()}
+		history := c.History()
+
+		var latest *netmap.NetworkMap
+		if len(history) > 0 {
+			latest = history[len(history)-1]
+		}
+
+		marks[c.Name] = vipViewMark{view: vipView(latest, vips), seen: len(history)}
 	}
 
 	return marks

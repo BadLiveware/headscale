@@ -178,28 +178,46 @@ func TestPlanRebalanceNothingWithinTolerance(t *testing.T) {
 	assert.Len(t, planRebalance(clients, func(types.NodeID) int { return 5 }, 0), 1, "with no tolerance the client moves to its target")
 }
 
-func TestRebalanceBudgetCarriesFraction(t *testing.T) {
+func TestRebalanceBudgetKeepsRate(t *testing.T) {
 	hosts := map[types.NodeID][]tailcfg.ServiceName{testFirstHost: nil}
 
-	var sv services
-
-	// 12 per minute at a 10 s interval: two moves every round.
-	budget := sv.rebalanceBudget(types.ServicesRebalanceConfig{Interval: 10 * time.Second, MovesPerHostPerMinute: 12}, hosts)
-	assert.Equal(t, 2, budget(testFirstHost))
-
-	// 6 per minute at a 1 s interval: one move every 10 rounds, never more.
-	cfg := types.ServicesRebalanceConfig{Interval: time.Second, MovesPerHostPerMinute: 6}
-	sv = services{}
-	moves := 0
-
-	for range 60 {
-		if sv.rebalanceBudget(cfg, hosts)(testFirstHost) >= 1 {
-			sv.credit[testFirstHost]--
-			moves++
-		}
+	tests := []struct {
+		perMinute int
+		interval  time.Duration
+		rounds    int
+		want      int
+	}{
+		{perMinute: 12, interval: 10 * time.Second, rounds: 60, want: 120},
+		{perMinute: 5, interval: 10 * time.Second, rounds: 60, want: 50},
+		{perMinute: 15, interval: 10 * time.Second, rounds: 60, want: 150},
+		{perMinute: 6, interval: time.Second, rounds: 60, want: 6},
 	}
 
-	assert.Equal(t, 6, moves, "the configured rate holds for a short interval")
+	for _, tt := range tests {
+		cfg := types.ServicesRebalanceConfig{Interval: tt.interval, MovesPerHostPerMinute: tt.perMinute}
+
+		var sv services
+
+		moves := 0
+
+		for range tt.rounds {
+			n := sv.rebalanceBudget(cfg, hosts)(testFirstHost)
+			sv.credit[testFirstHost] -= float64(n)
+			moves += n
+		}
+
+		assert.Equal(t, tt.want, moves, "%d per minute at %s, every move used", tt.perMinute, tt.interval)
+	}
+
+	// Unused whole moves are not saved up.
+	var sv services
+
+	cfg := types.ServicesRebalanceConfig{Interval: 10 * time.Second, MovesPerHostPerMinute: 12}
+	for range 10 {
+		sv.rebalanceBudget(cfg, hosts)
+	}
+
+	assert.Equal(t, 2, sv.rebalanceBudget(cfg, hosts)(testFirstHost), "no burst after idle rounds")
 }
 
 // sees returns a visibility function over sorted peers.
@@ -208,4 +226,16 @@ func sees(peers []types.NodeID) func(types.NodeID) bool {
 		_, ok := slices.BinarySearch(peers, h)
 		return ok
 	}
+}
+
+// TestRefreshLetsRebalanceLookAgain checks that a refresh, even one that
+// changes no host, clears the rebalance's balanced mark: clients can come
+// online or gain access without a host change.
+func TestRefreshLetsRebalanceLookAgain(t *testing.T) {
+	s := benchServiceState(t, 20)
+
+	s.services.balanced = s.services.index.Load()
+	s.refreshServiceHostsLocked()
+
+	assert.Nil(t, s.services.balanced)
 }

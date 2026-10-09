@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/juanfont/headscale/hscontrol/policy"
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -19,8 +20,8 @@ const (
 // benchServiceState builds a State with n online nodes that all see each
 // other (allow-all policy, the worst case for peer sets): three hosts of
 // svc:grafana and n-3 clients.
-func benchServiceState(b *testing.B, n int) *State {
-	b.Helper()
+func benchServiceState(tb testing.TB, n int) *State {
+	tb.Helper()
 
 	user := types.User{ID: 1, Name: "bench"}
 
@@ -57,7 +58,7 @@ func benchServiceState(b *testing.B, n int) *State {
 	}`)
 
 	pm, err := policy.NewPolicyManager(pol, []types.User{user}, nodes.ViewSlice())
-	require.NoError(b, err)
+	require.NoError(tb, err)
 
 	vips := serviceVIPMap{benchService: {
 		netip.MustParseAddr("100.127.0.1"),
@@ -65,11 +66,11 @@ func benchServiceState(b *testing.B, n int) *State {
 	}}
 
 	_, err = pm.SetServiceVIPs(vips)
-	require.NoError(b, err)
+	require.NoError(tb, err)
 
 	store := NewNodeStore(nodes, policyPeersFunc(pm), TestBatchSize, TestBatchTimeout)
 	store.Start()
-	b.Cleanup(store.Stop)
+	tb.Cleanup(store.Stop)
 
 	s := &State{
 		cfg:       &types.Config{},
@@ -115,11 +116,12 @@ func BenchmarkServiceRefreshHostChange(b *testing.B) {
 	}
 }
 
-// BenchmarkServiceRebalance is the cost of one rebalance round when the
-// clients are already balanced.
+// BenchmarkServiceRebalance is the cost of one rebalance round: when the
+// clients are balanced (no client keeps another host than its rendezvous
+// choice), and when a tenth of them do, which walks every online client.
 func BenchmarkServiceRebalance(b *testing.B) {
 	for _, n := range []int{1000, 3000} {
-		b.Run(fmt.Sprintf("nodes=%d", n), func(b *testing.B) {
+		b.Run(fmt.Sprintf("balanced/nodes=%d", n), func(b *testing.B) {
 			s := benchServiceState(b, n)
 			s.cfg.Services.Rebalance = types.ServicesRebalanceConfig{Interval: 1, MovesPerHostPerMinute: 1}
 
@@ -129,7 +131,44 @@ func BenchmarkServiceRebalance(b *testing.B) {
 				s.rebalanceServicesLocked()
 			}
 		})
+
+		b.Run(fmt.Sprintf("assigned/nodes=%d", n), func(b *testing.B) {
+			s := benchServiceState(b, n)
+			s.cfg.Services.Rebalance = types.ServicesRebalanceConfig{Interval: time.Minute, MovesPerHostPerMinute: 1}
+
+			skewed := withSkewedAssignments(s.services.index.Load(), n/10)
+
+			b.ReportAllocs()
+
+			for b.Loop() {
+				s.services.index.Store(skewed)
+				s.services.balanced = nil
+				s.rebalanceServicesLocked()
+			}
+		})
 	}
+}
+
+// withSkewedAssignments returns a copy of idx in which count clients keep
+// a host other than their rendezvous choice.
+func withSkewedAssignments(idx *serviceHostIndex, count int) *serviceHostIndex {
+	skewed := *idx
+	skewed.assigned = map[tailcfg.ServiceName]map[types.NodeID]types.NodeID{}
+
+	hosts := idx.hosts[benchService]
+
+	for v := types.NodeID(benchServiceHosts + 1); len(skewed.assigned[benchService]) < count; v++ {
+		target, _ := chooseServiceHost(v, hosts, idx.visibleTo(v))
+		for _, h := range hosts {
+			if h != target {
+				skewed.assign(benchService, v, h)
+
+				break
+			}
+		}
+	}
+
+	return &skewed
 }
 
 // BenchmarkServiceRoutesForPeers is the service part of building one
