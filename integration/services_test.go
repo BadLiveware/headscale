@@ -61,7 +61,7 @@ func TestServiceVIPs(t *testing.T) {
 	policy := &policyv2.Policy{
 		TagOwners: policyv2.TagOwners{
 			"tag:grafana": policyv2.Owners{usernameOwner(gatewayUser + "@")},
-			"tag:rogue":  policyv2.Owners{usernameOwner(rogueUser + "@")},
+			"tag:rogue":   policyv2.Owners{usernameOwner(rogueUser + "@")},
 		},
 		AutoApprovers: policyv2.AutoApproverPolicy{
 			Services: policyv2.ServiceApprovers{service: {"tag:grafana"}},

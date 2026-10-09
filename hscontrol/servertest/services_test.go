@@ -208,10 +208,7 @@ func TestServiceVIPs(t *testing.T) {
 
 	// Drain: gw1 withdraws. Its clients move to gw2; gw2's clients keep
 	// their host and get no update for it.
-	updatesBefore := map[string]int{}
-	for _, c := range clients {
-		updatesBefore[c.Name] = c.UpdateCount()
-	}
+	before := snapshotVIPViews(clients, vips)
 
 	start := time.Now()
 
@@ -224,15 +221,9 @@ func TestServiceVIPs(t *testing.T) {
 
 	t.Logf("withdraw: all clients on gw2 after %s", time.Since(start))
 
-	require.Never(t, func() bool {
-		for _, c := range clients {
-			if choice[c.Name] == "gw2" && c.UpdateCount() != updatesBefore[c.Name] {
-				return true
-			}
-		}
-
-		return false
-	}, time.Second, 100*time.Millisecond, "clients that kept gw2 get no map update")
+	requireVIPViewsKept(t, clients, before, vips, func(c *servertest.TestClient) bool {
+		return choice[c.Name] == "gw2"
+	}, "clients that kept gw2 see no change to its VIP routes")
 
 	// gw1 advertises again: exactly its clients move back.
 	gw1.AdvertiseServices(t, serviceName)
@@ -494,10 +485,7 @@ func TestServiceStickyRebalance(t *testing.T) {
 			func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw1" })
 	}
 
-	updatesBefore := map[string]int{}
-	for _, c := range clients {
-		updatesBefore[c.Name] = c.UpdateCount()
-	}
+	before := snapshotVIPViews(clients, vips)
 
 	gw2.AdvertiseServices(t, serviceName)
 
@@ -505,15 +493,8 @@ func TestServiceStickyRebalance(t *testing.T) {
 		return len(srv.State().ServiceHosts(serviceName)) == 2
 	}, serviceWait, 50*time.Millisecond, "gw2 becomes an active host")
 
-	require.Never(t, func() bool {
-		for _, c := range clients {
-			if c.UpdateCount() != updatesBefore[c.Name] {
-				return true
-			}
-		}
-
-		return false
-	}, time.Second, 100*time.Millisecond, "a joining host takes no client at once")
+	requireVIPViewsKept(t, clients, before, vips, func(*servertest.TestClient) bool { return true },
+		"a joining host takes no client at once")
 
 	// Each round may take one client from gw1 (1 per minute, 1-minute
 	// interval). Rounds continue until every client is on its target.
@@ -554,10 +535,7 @@ func TestServiceStickyRebalance(t *testing.T) {
 	t.Logf("rebalance: %d of %d clients moved to gw2 in %d rounds", onGW2, numClients, rounds)
 
 	// gw2 leaves: only its clients move, at once.
-	updatesBefore = map[string]int{}
-	for _, c := range clients {
-		updatesBefore[c.Name] = c.UpdateCount()
-	}
+	before = snapshotVIPViews(clients, vips)
 
 	gw2.AdvertiseServices(t)
 
@@ -566,15 +544,9 @@ func TestServiceStickyRebalance(t *testing.T) {
 			func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw1" })
 	}
 
-	require.Never(t, func() bool {
-		for _, c := range clients {
-			if want[c.Name] == "gw1" && c.UpdateCount() != updatesBefore[c.Name] {
-				return true
-			}
-		}
-
-		return false
-	}, time.Second, 100*time.Millisecond, "clients that were on gw1 get no update")
+	requireVIPViewsKept(t, clients, before, vips, func(c *servertest.TestClient) bool {
+		return want[c.Name] == "gw1"
+	}, "clients that were on gw1 see no change to its VIP routes")
 }
 
 // TestServiceStartupGraceSpreadsClients checks that hosts that come up one
@@ -627,4 +599,91 @@ func TestServiceStartupGraceSpreadsClients(t *testing.T) {
 
 		return onGW2 > 0
 	}, serviceWait, 50*time.Millisecond, "without any rebalance round, gw2 gets its rendezvous share at once")
+}
+
+// vipView describes how a netmap routes the VIPs: the carrying peer and that
+// peer's AllowedIPs.
+func vipView(nm *netmap.NetworkMap, vips []netip.Addr) string {
+	host := carrier(nm, vips)
+	if nm == nil || host == "" {
+		return host
+	}
+
+	for _, p := range nm.Peers {
+		if p.Hostinfo().Hostname() == host {
+			return fmt.Sprintf("%s %v", host, p.AllowedIPs().AsSlice())
+		}
+	}
+
+	return host
+}
+
+// vipViewMark is a client's VIP view and how many netmaps it had then.
+type vipViewMark struct {
+	view string
+	seen int
+}
+
+func snapshotVIPViews(clients []*servertest.TestClient, vips []netip.Addr) map[string]vipViewMark {
+	marks := make(map[string]vipViewMark, len(clients))
+	for _, c := range clients {
+		marks[c.Name] = vipViewMark{view: vipView(c.Netmap(), vips), seen: c.UpdateCount()}
+	}
+
+	return marks
+}
+
+// requireVIPViewsKept fails when any netmap that a selected client got
+// since its mark, now or during the next second, routes the VIPs
+// differently. Other updates (online state, DNS) do not count.
+func requireVIPViewsKept(
+	t *testing.T,
+	clients []*servertest.TestClient,
+	marks map[string]vipViewMark,
+	vips []netip.Addr,
+	selected func(*servertest.TestClient) bool,
+	msg string,
+) {
+	t.Helper()
+
+	changed := func() bool {
+		for _, c := range clients {
+			if !selected(c) {
+				continue
+			}
+
+			for _, nm := range c.History()[marks[c.Name].seen:] {
+				if vipView(nm, vips) != marks[c.Name].view {
+					return true
+				}
+			}
+		}
+
+		return false
+	}
+
+	require.Never(t, changed, time.Second, 100*time.Millisecond, msg)
+}
+
+// TestServiceNameYieldsToNodeName checks that a node renamed to the
+// service's label keeps that MagicDNS name, so the service record goes,
+// and that the record comes back when the node gets another name.
+func TestServiceNameYieldsToNodeName(t *testing.T) {
+	t.Parallel()
+
+	srv, gw, client, vips := lastHostSetup(t)
+
+	_, c, err := srv.State().RenameNode(nodeIDOf(gw), "grafana")
+	require.NoError(t, err)
+	srv.App.Change(c)
+
+	client.WaitForCondition(t, "the node named grafana hides the service record", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return len(serviceRecords(nm)) == 0 })
+
+	_, c, err = srv.State().RenameNode(nodeIDOf(gw), "gw")
+	require.NoError(t, err)
+	srv.App.Change(c)
+
+	client.WaitForCondition(t, "the service record returns after the rename", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return slices.Equal(serviceRecords(nm), sorted(vips)) })
 }
