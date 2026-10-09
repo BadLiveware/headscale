@@ -20,16 +20,16 @@ Only tagged nodes host services.
 ```json title="policy.json"
 {
   "tagOwners": {
-    "tag:gw-cca": ["alice@"]
+    "tag:grafana": ["alice@"]
   },
   "autoApprovers": {
     "services": {
-      "svc:cca": ["tag:gw-cca"]
+      "svc:grafana": ["tag:grafana"]
     }
   },
   "grants": [
     // Members reach the service on TCP port 443.
-    { "src": ["autogroup:member"], "dst": ["svc:cca"], "ip": ["tcp:443"] }
+    { "src": ["autogroup:member"], "dst": ["svc:grafana"], "ip": ["tcp:443"] }
   ]
 }
 ```
@@ -38,7 +38,7 @@ Only tagged nodes host services.
   stores them in the database.
   A service keeps its VIPs across restarts, and when the policy removes and adds it again.
   Headscale never gives a VIP to a node or to another service.
-- `svc:<label>` is a destination for grants and ACLs (`"svc:cca:443"` in an ACL).
+- `svc:<label>` is a destination for grants and ACLs (`"svc:grafana:443"` in an ACL).
   It cannot be a source, an SSH destination or a `nodeAttrs` target.
 - A grant to the tag of the hosts lets clients reach the hosts' own addresses, not the service.
 - Give each service its own tag, and register its hosts with a pre-auth key for that tag, so that a node of one service
@@ -49,8 +49,8 @@ Only tagged nodes host services.
 A host serves the service and advertises it:
 
 ```console
-tailscale serve --service=svc:cca --https=443 127.0.0.1:8443
-tailscale serve --service=svc:cca --tcp=443 tcp://127.0.0.1:8443
+tailscale serve --service=svc:grafana --https=443 127.0.0.1:8443
+tailscale serve --service=svc:grafana --tcp=443 tcp://127.0.0.1:8443
 ```
 
 A [tsnet](https://tailscale.com/docs/features/tsnet) program uses `Server.ListenService`.
@@ -60,13 +60,13 @@ To drain a host, stop advertising the service; the host keeps serving the connec
 clients to another host:
 
 ```console
-tailscale serve drain svc:cca
-tailscale serve advertise svc:cca  # host again
+tailscale serve drain svc:grafana
+tailscale serve advertise svc:grafana  # host again
 ```
 
 ## Reach a service
 
-Clients reach the service at `<label>.<dns.base_domain>`, for example `cca.example.com`, or at the VIPs.
+Clients reach the service at `<label>.<dns.base_domain>`, for example `grafana.example.com`, or at the VIPs.
 Only clients that the policy lets reach the service get the name and the route to the VIPs.
 When a node's MagicDNS name uses the same label, the node keeps the name and the service is reachable at its VIPs.
 

@@ -17,25 +17,25 @@ import (
 )
 
 const (
-	serviceName    = tailcfg.ServiceName("svc:cca")
-	serviceDNSName = "cca.headscale.net"
+	serviceName    = tailcfg.ServiceName("svc:grafana")
+	serviceDNSName = "grafana.headscale.net"
 	serviceWait    = 15 * time.Second
 )
 
 const servicesPolicy = `{
 	"tagOwners": {
-		"tag:gw-cca": ["svc-user@"],
+		"tag:grafana": ["svc-user@"],
 		"tag:rogue": ["svc-user@"],
 		"tag:client": ["svc-user@"]
 	},
-	"autoApprovers": {"services": {"svc:cca": ["tag:gw-cca"]}},
+	"autoApprovers": {"services": {"svc:grafana": ["tag:grafana"]}},
 	"grants": [
-		{"src": ["tag:client"], "dst": ["svc:cca"], "ip": ["tcp:80"]},
+		{"src": ["tag:client"], "dst": ["svc:grafana"], "ip": ["tcp:80"]},
 		{"src": ["tag:client"], "dst": ["tag:rogue"], "ip": ["*"]}
 	]
 }`
 
-// serviceVIPsOf returns the VIPs of svc:cca from a host's service-host
+// serviceVIPsOf returns the VIPs of svc:grafana from a host's service-host
 // capability.
 func serviceVIPsOf(nm *netmap.NetworkMap) []netip.Addr {
 	if nm == nil || !nm.SelfNode.Valid() {
@@ -142,8 +142,8 @@ func TestServiceVIPs(t *testing.T) {
 		return servertest.NewClient(t, srv, name, opts...)
 	}
 
-	gw1 := newClient("gw1", "tag:gw-cca")
-	gw2 := newClient("gw2", "tag:gw-cca")
+	gw1 := newClient("gw1", "tag:grafana")
+	gw2 := newClient("gw2", "tag:grafana")
 	rogue := newClient("rogue", "tag:rogue")
 	outsider := newClient("outsider")
 
@@ -275,12 +275,12 @@ func sorted(addrs []netip.Addr) []netip.Addr {
 func TestServiceVIPsForClaimedNames(t *testing.T) {
 	t.Parallel()
 
-	const claimed = "cca.gw.example.com"
+	const claimed = "grafana.gw.example.com"
 
 	pol := `{
-		"tagOwners": {"tag:gw-cca": ["svc-user@"]},
-		"autoApprovers": {"services": {"svc:cca": ["tag:gw-cca"]}},
-		"hostnameClaims": {"*.gw.example.com": ["tag:gw-cca"]},
+		"tagOwners": {"tag:grafana": ["svc-user@"]},
+		"autoApprovers": {"services": {"svc:grafana": ["tag:grafana"]}},
+		"hostnameClaims": {"*.gw.example.com": ["tag:grafana"]},
 		"grants": [{"src": ["*"], "dst": ["*"], "ip": ["*"]}]
 	}`
 
@@ -291,7 +291,7 @@ func TestServiceVIPsForClaimedNames(t *testing.T) {
 	vips := srv.State().ServiceVIPs(serviceName)
 	require.Len(t, vips, 2)
 
-	gw := servertest.NewClient(t, srv, "gw", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
+	gw := servertest.NewClient(t, srv, "gw", servertest.WithUser(user), servertest.WithTags("tag:grafana"))
 	viewer := servertest.NewClient(t, srv, "viewer", servertest.WithUser(user))
 
 	viewer.WaitForPeers(t, 1, 10*time.Second)
@@ -312,7 +312,7 @@ func TestServiceVIPsForClaimedNames(t *testing.T) {
 		func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw" })
 
 	reloadPolicy(t, srv, `{
-		"tagOwners": {"tag:gw-cca": ["svc-user@"]},
+		"tagOwners": {"tag:grafana": ["svc-user@"]},
 		"grants": [{"src": ["*"], "dst": ["*"], "ip": ["*"]}]
 	}`)
 
@@ -329,7 +329,7 @@ func TestServiceVIPsForClaimedNames(t *testing.T) {
 		func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw" })
 }
 
-// lastHostSetup starts a server with one active host of svc:cca and a
+// lastHostSetup starts a server with one active host of svc:grafana and a
 // client that reaches the service through it.
 func lastHostSetup(t *testing.T) (*servertest.TestServer, *servertest.TestClient, *servertest.TestClient, []netip.Addr) {
 	t.Helper()
@@ -341,7 +341,7 @@ func lastHostSetup(t *testing.T) (*servertest.TestServer, *servertest.TestClient
 	vips := srv.State().ServiceVIPs(serviceName)
 	require.Len(t, vips, 2)
 
-	gw := servertest.NewClient(t, srv, "gw", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
+	gw := servertest.NewClient(t, srv, "gw", servertest.WithUser(user), servertest.WithTags("tag:grafana"))
 	client := servertest.NewClient(t, srv, "client", servertest.WithUser(user), servertest.WithTags("tag:client"))
 
 	client.WaitForPeers(t, 1, 10*time.Second)
@@ -379,7 +379,7 @@ func TestServiceLastHostLosesTag(t *testing.T) {
 		func(nm *netmap.NetworkMap) bool { return nm != nil && len(serviceVIPsOf(nm)) == 0 })
 	require.Equal(t, sorted(vips), serviceRecords(client.Netmap()), "the defined service keeps its name")
 
-	_, c, err = srv.State().SetNodeTags(nodeIDOf(gw), []string{"tag:gw-cca"})
+	_, c, err = srv.State().SetNodeTags(nodeIDOf(gw), []string{"tag:grafana"})
 	require.NoError(t, err)
 	srv.App.Change(c)
 
@@ -414,14 +414,14 @@ func TestServiceApprovalMovesToAnotherTag(t *testing.T) {
 
 	reloadPolicy(t, srv, `{
 		"tagOwners": {
-			"tag:gw-cca": ["svc-user@"],
+			"tag:grafana": ["svc-user@"],
 			"tag:rogue": ["svc-user@"],
 			"tag:client": ["svc-user@"]
 		},
-		"autoApprovers": {"services": {"svc:cca": ["tag:rogue"]}},
+		"autoApprovers": {"services": {"svc:grafana": ["tag:rogue"]}},
 		"grants": [
-			{"src": ["tag:client"], "dst": ["svc:cca"], "ip": ["tcp:80"]},
-			{"src": ["tag:client"], "dst": ["tag:gw-cca"], "ip": ["*"]}
+			{"src": ["tag:client"], "dst": ["svc:grafana"], "ip": ["tcp:80"]},
+			{"src": ["tag:client"], "dst": ["tag:grafana"], "ip": ["*"]}
 		]
 	}`)
 
@@ -472,8 +472,8 @@ func TestServiceStickyRebalance(t *testing.T) {
 
 	vips := srv.State().ServiceVIPs(serviceName)
 
-	gw1 := servertest.NewClient(t, srv, "gw1", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
-	gw2 := servertest.NewClient(t, srv, "gw2", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
+	gw1 := servertest.NewClient(t, srv, "gw1", servertest.WithUser(user), servertest.WithTags("tag:grafana"))
+	gw2 := servertest.NewClient(t, srv, "gw2", servertest.WithUser(user), servertest.WithTags("tag:grafana"))
 
 	const numClients = 8
 
@@ -592,8 +592,8 @@ func TestServiceStartupGraceSpreadsClients(t *testing.T) {
 
 	vips := srv.State().ServiceVIPs(serviceName)
 
-	gw1 := servertest.NewClient(t, srv, "gw1", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
-	gw2 := servertest.NewClient(t, srv, "gw2", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
+	gw1 := servertest.NewClient(t, srv, "gw1", servertest.WithUser(user), servertest.WithTags("tag:grafana"))
+	gw2 := servertest.NewClient(t, srv, "gw2", servertest.WithUser(user), servertest.WithTags("tag:grafana"))
 
 	const numClients = 8
 

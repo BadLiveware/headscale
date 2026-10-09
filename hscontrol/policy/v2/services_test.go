@@ -15,17 +15,17 @@ import (
 
 const servicesTestPolicy = `{
 	"tagOwners": {
-		"tag:gw-cca": ["user@"],
-		"tag:gw-other": ["user@"],
+		"tag:grafana": ["user@"],
+		"tag:gitea": ["user@"],
 		"tag:client": ["user@"]
 	},
 	"autoApprovers": {
 		"services": {
-			"svc:cca": ["tag:gw-cca"]
+			"svc:grafana": ["tag:grafana"]
 		}
 	},
 	"grants": [
-		{"src": ["tag:client"], "dst": ["svc:cca"], "ip": ["tcp:443"]}
+		{"src": ["tag:client"], "dst": ["svc:grafana"], "ip": ["tcp:443"]}
 	]
 }`
 
@@ -47,54 +47,54 @@ func TestServicesValidation(t *testing.T) {
 		{
 			name: "acl-to-defined-service-with-port",
 			policy: `{
-				"tagOwners": {"tag:gw": ["user@"]},
-				"autoApprovers": {"services": {"svc:cca": ["tag:gw"]}},
-				"acls": [{"action": "accept", "src": ["user@"], "dst": ["svc:cca:443"]}]
+				"tagOwners": {"tag:grafana": ["user@"]},
+				"autoApprovers": {"services": {"svc:grafana": ["tag:grafana"]}},
+				"acls": [{"action": "accept", "src": ["user@"], "dst": ["svc:grafana:443"]}]
 			}`,
 		},
 		{
 			name: "undefined-service",
 			policy: `{
-				"tagOwners": {"tag:gw": ["user@"]},
-				"grants": [{"src": ["user@"], "dst": ["svc:cca"], "ip": ["443"]}]
+				"tagOwners": {"tag:grafana": ["user@"]},
+				"grants": [{"src": ["user@"], "dst": ["svc:grafana"], "ip": ["443"]}]
 			}`,
 			wantErr: "service not defined",
 		},
 		{
 			name: "service-as-source",
 			policy: `{
-				"tagOwners": {"tag:gw": ["user@"]},
-				"autoApprovers": {"services": {"svc:cca": ["tag:gw"]}},
-				"grants": [{"src": ["svc:cca"], "dst": ["*"], "ip": ["443"]}]
+				"tagOwners": {"tag:grafana": ["user@"]},
+				"autoApprovers": {"services": {"svc:grafana": ["tag:grafana"]}},
+				"grants": [{"src": ["svc:grafana"], "dst": ["*"], "ip": ["443"]}]
 			}`,
 			wantErr: "only be a destination",
 		},
 		{
 			name: "undefined-host-tag",
 			policy: `{
-				"autoApprovers": {"services": {"svc:cca": ["tag:gw"]}}
+				"autoApprovers": {"services": {"svc:grafana": ["tag:grafana"]}}
 			}`,
 			wantErr: "tag not found",
 		},
 		{
 			name: "no-host-tags",
 			policy: `{
-				"autoApprovers": {"services": {"svc:cca": []}}
+				"autoApprovers": {"services": {"svc:grafana": []}}
 			}`,
 			wantErr: "lists no tags",
 		},
 		{
 			name: "invalid-service-name",
 			policy: `{
-				"tagOwners": {"tag:gw": ["user@"]},
-				"autoApprovers": {"services": {"svc:Bad_Name": ["tag:gw"]}}
+				"tagOwners": {"tag:grafana": ["user@"]},
+				"autoApprovers": {"services": {"svc:Bad_Name": ["tag:grafana"]}}
 			}`,
 			wantErr: "invalid service name",
 		},
 		{
 			name: "user-as-host",
 			policy: `{
-				"autoApprovers": {"services": {"svc:cca": ["user@"]}}
+				"autoApprovers": {"services": {"svc:grafana": ["user@"]}}
 			}`,
 			wantErr: "tag",
 		},
@@ -113,13 +113,13 @@ func TestServicesValidation(t *testing.T) {
 	}
 }
 
-// servicesTestNodes returns two hosts of svc:cca, a host with another
+// servicesTestNodes returns two hosts of svc:grafana, a host with another
 // tag, an allowed client, and an untagged user node.
 func servicesTestNodes(users types.Users) []*types.Node {
 	return []*types.Node{
-		{ID: 1, Tags: []string{"tag:gw-cca"}, IPv4: ap("100.64.0.1"), IPv6: ap("fd7a:115c:a1e0::1")},
-		{ID: 2, Tags: []string{"tag:gw-cca"}, IPv4: ap("100.64.0.2"), IPv6: ap("fd7a:115c:a1e0::2")},
-		{ID: 3, Tags: []string{"tag:gw-other"}, IPv4: ap("100.64.0.3"), IPv6: ap("fd7a:115c:a1e0::3")},
+		{ID: 1, Tags: []string{"tag:grafana"}, IPv4: ap("100.64.0.1"), IPv6: ap("fd7a:115c:a1e0::1")},
+		{ID: 2, Tags: []string{"tag:grafana"}, IPv4: ap("100.64.0.2"), IPv6: ap("fd7a:115c:a1e0::2")},
+		{ID: 3, Tags: []string{"tag:gitea"}, IPv4: ap("100.64.0.3"), IPv6: ap("fd7a:115c:a1e0::3")},
 		{ID: 4, Tags: []string{"tag:client"}, IPv4: ap("100.64.0.4"), IPv6: ap("fd7a:115c:a1e0::4")},
 		{
 			ID:     5,
@@ -140,10 +140,10 @@ func newServicesTestManager(t *testing.T) (*PolicyManager, []*types.Node) {
 	pm, err := NewPolicyManager([]byte(servicesTestPolicy), users, types.Nodes(nodes).ViewSlice())
 	require.NoError(t, err)
 
-	assert.Equal(t, []tailcfg.ServiceName{"svc:cca"}, pm.ServiceNames())
+	assert.Equal(t, []tailcfg.ServiceName{"svc:grafana"}, pm.ServiceNames())
 
 	changed, err := pm.SetServiceVIPs(map[tailcfg.ServiceName][]netip.Addr{
-		"svc:cca": {testVIP4, testVIP6},
+		"svc:grafana": {testVIP4, testVIP6},
 	})
 	require.NoError(t, err)
 	assert.True(t, changed, "setting the VIPs changes the compiled policy")
@@ -158,7 +158,7 @@ func TestServiceHostCapability(t *testing.T) {
 		caps := pm.NodeCapMap(n.ID)
 		raw, ok := caps[nodecap.ServiceHost]
 
-		if !slices.Contains(n.Tags, "tag:gw-cca") {
+		if !slices.Contains(n.Tags, "tag:grafana") {
 			assert.False(t, ok, "node %d must not be a service host", n.ID)
 			continue
 		}
@@ -168,11 +168,11 @@ func TestServiceHostCapability(t *testing.T) {
 
 		var got tailcfg.ServiceIPMappings
 		require.NoError(t, json.Unmarshal([]byte(raw[0]), &got))
-		assert.Equal(t, tailcfg.ServiceIPMappings{"svc:cca": {testVIP4, testVIP6}}, got)
+		assert.Equal(t, tailcfg.ServiceIPMappings{"svc:grafana": {testVIP4, testVIP6}}, got)
 	}
 
 	assert.Equal(t,
-		[]tailcfg.ServiceName{"svc:cca"},
+		[]tailcfg.ServiceName{"svc:grafana"},
 		pm.NodeServices(nodes[0].View()),
 	)
 	assert.Empty(t, pm.NodeServices(nodes[2].View()), "another tag is not approved")
@@ -196,7 +196,7 @@ func TestServiceFilterRules(t *testing.T) {
 			dsts = append(dsts, r.DstPorts...)
 		}
 
-		if slices.Contains(n.Tags, "tag:gw-cca") {
+		if slices.Contains(n.Tags, "tag:grafana") {
 			assert.ElementsMatch(t, vipDsts, dsts, "host %d gets the rule for the VIPs", n.ID)
 
 			require.Len(t, rules, 1)

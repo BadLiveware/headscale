@@ -24,7 +24,7 @@ import (
 const serviceOldClientVersion = "1.102"
 
 // TestServiceVIPs checks Tailscale Services with virtual IPs (VIPs) end to
-// end with stock clients. Two gateways host svc:cca with `tailscale serve
+// end with stock clients. Two gateways host svc:grafana with `tailscale serve
 // --service`; each client reaches the service at its VIP and its name and
 // lands on one gateway; a gateway that drains or stops loses its clients
 // to the other gateway; a node whose tag is not approved never serves the
@@ -37,9 +37,9 @@ func TestServiceVIPs(t *testing.T) {
 		rogueUser    = "rogue"
 		clientUser   = "client"
 		outsiderUser = "outsider"
-		service      = "svc:cca"
+		service      = "svc:grafana"
 		servicePort  = 80
-		serviceLabel = "cca"
+		serviceLabel = "grafana"
 		pollInterval = 250 * time.Millisecond
 		headClients  = 4
 		allClients   = headClients + 1
@@ -60,11 +60,11 @@ func TestServiceVIPs(t *testing.T) {
 
 	policy := &policyv2.Policy{
 		TagOwners: policyv2.TagOwners{
-			"tag:gw-cca": policyv2.Owners{usernameOwner(gatewayUser + "@")},
+			"tag:grafana": policyv2.Owners{usernameOwner(gatewayUser + "@")},
 			"tag:rogue":  policyv2.Owners{usernameOwner(rogueUser + "@")},
 		},
 		AutoApprovers: policyv2.AutoApproverPolicy{
-			Services: policyv2.ServiceApprovers{service: {"tag:gw-cca"}},
+			Services: policyv2.ServiceApprovers{service: {"tag:grafana"}},
 		},
 		Grants: []policyv2.Grant{
 			{
@@ -102,7 +102,7 @@ func TestServiceVIPs(t *testing.T) {
 		count   int
 		tags    []string
 	}{
-		{user: gatewayUser, version: tsic.VersionHead, count: 2, tags: []string{"tag:gw-cca"}},
+		{user: gatewayUser, version: tsic.VersionHead, count: 2, tags: []string{"tag:grafana"}},
 		{user: rogueUser, version: tsic.VersionHead, count: 1, tags: []string{"tag:rogue"}},
 		{user: clientUser, version: tsic.VersionHead, count: headClients},
 		{user: clientUser, version: serviceOldClientVersion, count: 1},
@@ -128,7 +128,7 @@ func TestServiceVIPs(t *testing.T) {
 	for user, id := range userIDs {
 		key, err := scenario.CreatePreAuthKey(id, true, false)
 		if user == gatewayUser {
-			key, err = scenario.CreatePreAuthKeyWithTags(id, true, false, []string{"tag:gw-cca"})
+			key, err = scenario.CreatePreAuthKeyWithTags(id, true, false, []string{"tag:grafana"})
 		}
 
 		if user == rogueUser {

@@ -77,7 +77,7 @@ func (s *Service) resolve(p *Policy, _ types.Users, _ views.Slice[types.NodeView
 
 // ServiceApprovers maps a service name to the tags whose nodes may host
 // the service. It is the `services` part of autoApprovers, in Tailscale's
-// grammar: `"svc:cca": ["tag:gw-cca"]`.
+// grammar: `"svc:grafana": ["tag:grafana"]`.
 type ServiceApprovers map[tailcfg.ServiceName][]Tag
 
 // validateServices checks the autoApprovers.services section and every

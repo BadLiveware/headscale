@@ -82,38 +82,38 @@ func TestDeriveServiceHosts(t *testing.T) {
 		}
 	}
 
-	gw := []string{"tag:gw"}
+	gw := []string{"tag:grafana"}
 
-	expired := online(4, gw, "svc:cca")
+	expired := online(4, gw, "svc:grafana")
 	expired.Expiry = new(time.Now().Add(-time.Hour))
 
-	offline := online(5, gw, "svc:cca")
+	offline := online(5, gw, "svc:grafana")
 	offline.IsOnline = new(false)
 
 	nodes := types.Nodes{
-		online(1, gw, "svc:cca", "svc:web"),
-		online(2, gw, "svc:cca"),
-		online(3, []string{"tag:other"}, "svc:cca"),
+		online(1, gw, "svc:grafana", "svc:gitea"),
+		online(2, gw, "svc:grafana"),
+		online(3, []string{"tag:gitea"}, "svc:grafana"),
 		expired,
 		offline,
 		online(6, gw),
 	}
 
 	approve := func(n types.NodeView) []tailcfg.ServiceName {
-		if n.HasTag("tag:gw") {
-			return []tailcfg.ServiceName{"svc:cca", "svc:web"}
+		if n.HasTag("tag:grafana") {
+			return []tailcfg.ServiceName{"svc:grafana", "svc:gitea"}
 		}
 
 		return nil
 	}
 
 	vips := serviceVIPMap{
-		"svc:cca": {netip.MustParseAddr("100.64.0.100")},
+		"svc:grafana": {netip.MustParseAddr("100.64.0.100")},
 	}
 
 	idx := deriveServiceHosts(views.SliceOf(nodes.ViewSlice().AsSlice()), approve, vips)
 
-	assert.Equal(t, serviceHostMap{"svc:cca": {1, 2}}, idx.hosts,
+	assert.Equal(t, serviceHostMap{"svc:grafana": {1, 2}}, idx.hosts,
 		"only online, unexpired, approved, advertising hosts of services with VIPs")
-	assert.Equal(t, []tailcfg.ServiceName{"svc:cca"}, idx.byNode[1])
+	assert.Equal(t, []tailcfg.ServiceName{"svc:grafana"}, idx.byNode[1])
 }
