@@ -556,6 +556,15 @@ func PingNode(nodeID types.NodeID, pr *tailcfg.PingRequest) Change {
 	}
 }
 
+// HostnameClaims returns a [Change] for when the records of node-claimed
+// hostnames change.
+func HostnameClaims() Change {
+	c := DNSConfig()
+	c.Reason = "hostname claims update"
+
+	return c
+}
+
 // ExtraRecords returns a [Change] for when DNS extra records change.
 func ExtraRecords() Change {
 	c := DNSConfig()

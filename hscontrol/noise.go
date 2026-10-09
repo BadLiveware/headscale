@@ -167,6 +167,7 @@ func (h *Headscale) NoiseUpgradeHandler(
 	r.Route("/machine", func(r chi.Router) {
 		r.Post("/register", ns.RegistrationHandler)
 		r.Post("/map", ns.PollNetMapHandler)
+		r.Post(strings.TrimPrefix(c2nResponsePath, "/machine"), ns.C2NResponseHandler)
 
 		// SSH Check mode endpoint, consulted to validate if a given SSH connection should be accepted or rejected.
 		r.Get("/ssh/action/{src_node_id}/to/{dst_node_id}", ns.SSHActionHandler)

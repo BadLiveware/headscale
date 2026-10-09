@@ -2,9 +2,12 @@ package servertest
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/juanfont/headscale/hscontrol/types"
 	"tailscale.com/control/controlclient"
+	_ "tailscale.com/feature/c2n" // answers c2n PingRequests, as tailscaled does
 	"tailscale.com/health"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/tsdial"
@@ -61,6 +65,10 @@ type TestClient struct {
 
 	// cut black-holes every connection of the client, see [TestClient.CutNetwork].
 	cut *atomic.Bool
+	// hostinfo is the Hostinfo the client reports; services are the
+	// service names it advertises as active. Both guarded by mu.
+	hostinfo *tailcfg.Hostinfo
+	services []tailcfg.ServiceName
 }
 
 // ClientOption configures a [TestClient].
@@ -157,26 +165,34 @@ func NewClient(tb testing.TB, server *TestServer, name string, opts ...ClientOpt
 
 	machineKey := key.NewMachine()
 
+	hostinfo := &tailcfg.Hostinfo{
+		BackendLogID: "servertest-" + name,
+		Hostname:     cc.hostname,
+	}
+
+	// tc is assigned below; the c2n handler only runs once polling starts.
+	var tc *TestClient
+
 	direct, err := controlclient.NewDirect(controlclient.Options{
 		Persist:              persist.Persist{},
 		GetMachinePrivateKey: func() (key.MachinePrivate, error) { return machineKey, nil },
 		ServerURL:            server.URL,
 		AuthKey:              authKey,
-		Hostinfo: &tailcfg.Hostinfo{
-			BackendLogID: "servertest-" + name,
-			Hostname:     cc.hostname,
-		},
-		DiscoPublicKey: key.NewDisco().Public(),
-		Logf:           tb.Logf,
-		HealthTracker:  tracker,
-		Dialer:         dialer,
-		Bus:            bus,
+		Hostinfo:             hostinfo,
+		DiscoPublicKey:       key.NewDisco().Public(),
+		Logf:                 tb.Logf,
+		HealthTracker:        tracker,
+		Dialer:               dialer,
+		Bus:                  bus,
+		C2NHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tc.serveC2N(w, r)
+		}),
 	})
 	if err != nil {
 		tb.Fatalf("servertest: NewDirect(%s): %v", name, err)
 	}
 
-	tc := &TestClient{
+	tc = &TestClient{
 		Name:    name,
 		server:  server,
 		direct:  direct,
@@ -189,6 +205,7 @@ func NewClient(tb testing.TB, server *TestServer, name string, opts ...ClientOpt
 		cut:     cut,
 
 		deltaUpdates: cc.deltaUpdates,
+		hostinfo:     hostinfo,
 	}
 
 	tb.Cleanup(func() {
@@ -697,4 +714,66 @@ func (c *cuttableConn) Write(b []byte) (int, error) {
 	}
 
 	return c.Conn.Write(b)
+}
+
+// serveC2N answers the c2n requests that control sends in a
+// [tailcfg.PingRequest]. Like tailscaled, it serves GET /vip-services.
+func (c *TestClient) serveC2N(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || r.URL.Path != "/vip-services" {
+		http.NotFound(w, r)
+		return
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	res := tailcfg.C2NVIPServicesResponse{ServicesHash: c.hostinfo.ServicesHash}
+	for _, svc := range c.services {
+		res.VIPServices = append(res.VIPServices, &tailcfg.VIPService{Name: svc, Active: true})
+	}
+
+	body, err := json.Marshal(res)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// AdvertiseServices sets the services the client advertises, as
+// `tailscale serve advertise` and `tailscale serve drain` do: it reports a
+// new [tailcfg.Hostinfo.ServicesHash] (empty for no services) in a map
+// request, and serves the list when control asks for it over c2n.
+func (c *TestClient) AdvertiseServices(tb testing.TB, services ...tailcfg.ServiceName) {
+	tb.Helper()
+
+	c.mu.Lock()
+	c.services = slices.Clone(services)
+
+	hi := c.hostinfo.Clone()
+	hi.ServicesHash = ""
+
+	if len(services) > 0 {
+		names := make([]string, len(services))
+		for i, svc := range services {
+			names[i] = svc.String()
+		}
+
+		hi.ServicesHash = "servertest:" + strings.Join(names, ",")
+	}
+
+	c.hostinfo = hi
+	c.mu.Unlock()
+
+	c.direct.SetHostinfo(hi)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := c.direct.SendUpdate(ctx)
+	if err != nil {
+		tb.Fatalf("servertest: AdvertiseServices(%s): %v", c.Name, err)
+	}
 }

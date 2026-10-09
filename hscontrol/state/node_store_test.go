@@ -1891,6 +1891,7 @@ var nodeFieldImpact = map[string]string{
 	"Expiry": "payload", "LastSeen": "payload", "CreatedAt": "payload",
 	"UpdatedAt": "payload", "DeletedAt": "payload",
 	"ActiveSessions": "payload", "SessionEpoch": "payload",
+	"AdvertisedServices": "payload", "AdvertisedServicesHash": "payload",
 }
 
 // TestUpdateChangesCoversEveryNodeField guards against a new types.Node

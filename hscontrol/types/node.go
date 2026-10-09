@@ -204,6 +204,16 @@ type Node struct {
 	// returned by Connect as a "Connect ran" sentinel for its cleanup,
 	// and Disconnect logs it. Runtime-only.
 	SessionEpoch uint64 `gorm:"-"`
+
+	// AdvertisedServices are the service names (`svc:<label>`) the
+	// client reports as active through the c2n `/vip-services`
+	// endpoint, which it fills from its AdvertiseServices preference.
+	// AdvertisedServicesHash is the [tailcfg.Hostinfo.ServicesHash]
+	// that list belongs to; a Hostinfo with a different hash means the
+	// list is stale and must be fetched again. Runtime-only: a client
+	// reports its hash on every connect, so a restart refetches.
+	AdvertisedServices     []string `gorm:"-"`
+	AdvertisedServicesHash string   `gorm:"-"`
 }
 
 type Nodes []*Node
