@@ -322,3 +322,124 @@ func TestServiceVIPsForClaimedNames(t *testing.T) {
 	viewer.WaitForCondition(t, "the restored service is reachable again", serviceWait,
 		func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw" })
 }
+
+// lastHostSetup starts a server with one active host of svc:cca and a
+// client that reaches the service through it.
+func lastHostSetup(t *testing.T) (*servertest.TestServer, *servertest.TestClient, *servertest.TestClient, []netip.Addr) {
+	t.Helper()
+
+	srv := servertest.NewServer(t, servertest.WithMagicDNS("headscale.net"))
+	user := srv.CreateUser(t, "svc-user")
+	reloadPolicy(t, srv, servicesPolicy)
+
+	vips := srv.State().ServiceVIPs(serviceName)
+	require.Len(t, vips, 2)
+
+	gw := servertest.NewClient(t, srv, "gw", servertest.WithUser(user), servertest.WithTags("tag:gw-cca"))
+	client := servertest.NewClient(t, srv, "client", servertest.WithUser(user), servertest.WithTags("tag:client"))
+
+	client.WaitForPeers(t, 1, 10*time.Second)
+
+	gw.AdvertiseServices(t, serviceName)
+
+	client.WaitForCondition(t, "client carries the VIPs on gw", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw" })
+	client.WaitForCondition(t, "client resolves the service", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return slices.Equal(serviceRecords(nm), sorted(vips)) })
+
+	return srv, gw, client, vips
+}
+
+func nodeIDOf(c *servertest.TestClient) types.NodeID {
+	return types.NodeID(c.Netmap().SelfNode.ID()) //nolint:gosec // test node IDs are small
+}
+
+// TestServiceLastHostLosesTag checks that when the only host loses its
+// approved tag, the client drops the VIP route and the host drops its
+// service-host capability; the service name stays, since the policy still
+// defines the service. Getting the tag back restores both.
+func TestServiceLastHostLosesTag(t *testing.T) {
+	t.Parallel()
+
+	srv, gw, client, vips := lastHostSetup(t)
+
+	_, c, err := srv.State().SetNodeTags(nodeIDOf(gw), []string{"tag:rogue"})
+	require.NoError(t, err)
+	srv.App.Change(c)
+
+	client.WaitForCondition(t, "client drops the VIP route of the unapproved host", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return len(vipCarriers(nm, vips)) == 0 })
+	gw.WaitForCondition(t, "gw drops its service-host capability", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return nm != nil && len(serviceVIPsOf(nm)) == 0 })
+	require.Equal(t, sorted(vips), serviceRecords(client.Netmap()), "the defined service keeps its name")
+
+	_, c, err = srv.State().SetNodeTags(nodeIDOf(gw), []string{"tag:gw-cca"})
+	require.NoError(t, err)
+	srv.App.Change(c)
+
+	client.WaitForCondition(t, "client carries the VIPs on gw again", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw" })
+}
+
+// TestServiceLastHostExpires checks that the client drops the VIP route
+// when the only host's key expires.
+func TestServiceLastHostExpires(t *testing.T) {
+	t.Parallel()
+
+	srv, gw, client, vips := lastHostSetup(t)
+
+	expired := time.Now().Add(-time.Minute)
+
+	_, c, err := srv.State().SetNodeExpiry(nodeIDOf(gw), &expired)
+	require.NoError(t, err)
+	srv.App.Change(c)
+
+	client.WaitForCondition(t, "client drops the VIP route of the expired host", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return len(vipCarriers(nm, vips)) == 0 })
+}
+
+// TestServiceApprovalMovesToAnotherTag checks that a policy change that
+// approves another tag for the service takes the VIP route away from the
+// only host, while the service keeps its name and VIPs.
+func TestServiceApprovalMovesToAnotherTag(t *testing.T) {
+	t.Parallel()
+
+	srv, gw, client, vips := lastHostSetup(t)
+
+	reloadPolicy(t, srv, `{
+		"tagOwners": {
+			"tag:gw-cca": ["svc-user@"],
+			"tag:rogue": ["svc-user@"],
+			"tag:client": ["svc-user@"]
+		},
+		"autoApprovers": {"services": {"svc:cca": ["tag:rogue"]}},
+		"grants": [
+			{"src": ["tag:client"], "dst": ["svc:cca"], "ip": ["tcp:80"]},
+			{"src": ["tag:client"], "dst": ["tag:gw-cca"], "ip": ["*"]}
+		]
+	}`)
+
+	client.WaitForCondition(t, "client drops the VIP route of the no longer approved host", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return len(vipCarriers(nm, vips)) == 0 })
+	gw.WaitForCondition(t, "gw drops its service-host capability", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return nm != nil && len(serviceVIPsOf(nm)) == 0 })
+	require.Equal(t, vips, srv.State().ServiceVIPs(serviceName))
+	require.Equal(t, sorted(vips), serviceRecords(client.Netmap()), "the defined service keeps its name")
+}
+
+// TestServiceClientLosesAccess checks that a client whose tag change takes
+// away its grant to the service drops the VIP route and the service name.
+func TestServiceClientLosesAccess(t *testing.T) {
+	t.Parallel()
+
+	srv, _, client, vips := lastHostSetup(t)
+
+	_, c, err := srv.State().SetNodeTags(nodeIDOf(client), []string{"tag:rogue"})
+	require.NoError(t, err)
+	srv.App.Change(c)
+
+	client.WaitForCondition(t, "client without a grant drops the VIP route and the name", serviceWait,
+		func(nm *netmap.NetworkMap) bool {
+			return len(vipCarriers(nm, vips)) == 0 && len(serviceRecords(nm)) == 0
+		})
+}
