@@ -19,9 +19,6 @@ import (
 	"tailscale.com/types/views"
 )
 
-// serviceNamePrefix starts every service name, `svc:<label>`.
-const serviceNamePrefix = "svc:"
-
 // serviceVIPMap maps a service to its virtual IP addresses (VIPs).
 type serviceVIPMap map[tailcfg.ServiceName][]netip.Addr
 
@@ -342,28 +339,41 @@ func (s *State) ServiceHosts(name tailcfg.ServiceName) []types.NodeID {
 	return slices.Clone(idx.hosts[name])
 }
 
-// withServiceRecords turns the claim records of service hosts into records
-// of the service's VIPs, and adds `<label>.<base domain>` for every service
-// with VIPs. A name that has VIP records keeps only those: a client answers
-// with the first address per family, and it must be the VIP.
+// withServiceRecords adds `<label>.<base domain>` with the VIPs for every
+// service that has VIPs. The claim records of hostnameClaims stay as they
+// are: those names answer with the addresses of the claiming hosts, so a
+// draining host keeps its open connections (a VIP move resets them).
 //
 // The base-domain name is not published when a node's MagicDNS name uses
-// the same label: the node keeps its name.
+// the same label: the node keeps its name, the rule Tailscale applies.
 func (s *State) withServiceRecords(records []claimRecord, nodes views.Slice[types.NodeView]) []claimRecord {
 	vipsPtr := s.services.vips.Load()
-	if vipsPtr == nil || len(*vipsPtr) == 0 {
+	if vipsPtr == nil || len(*vipsPtr) == 0 || s.cfg.BaseDomain == "" {
 		return records
 	}
 
 	vips := *vipsPtr
-	idx := s.services.index.Load()
 
-	var out []claimRecord
+	nodeNames := map[string]bool{}
+	for _, n := range nodes.All() {
+		nodeNames[strings.ToLower(n.GivenName())] = true
+	}
 
-	vipNames := map[string]bool{}
+	out := slices.Clone(records)
 
-	addVIPRecords := func(name string, svc tailcfg.ServiceName) {
-		vipNames[name] = true
+	for _, svc := range s.polMan.ServiceNames() {
+		label := strings.ToLower(svc.WithoutPrefix())
+		if len(vips[svc]) == 0 {
+			continue
+		}
+
+		if nodeNames[label] {
+			log.Warn().
+				Str("service", svc.String()).
+				Msg("service name not published: a node uses the same MagicDNS name")
+
+			continue
+		}
 
 		for _, addr := range vips[svc] {
 			recordType := dnsRecordTypeA
@@ -373,45 +383,16 @@ func (s *State) withServiceRecords(records []claimRecord, nodes views.Slice[type
 
 			out = append(out, claimRecord{
 				service: svc,
-				record:  tailcfg.DNSRecord{Name: name, Type: recordType, Value: addr.String()},
+				record: tailcfg.DNSRecord{
+					Name:  label + "." + s.cfg.BaseDomain,
+					Type:  recordType,
+					Value: addr.String(),
+				},
 			})
 		}
 	}
 
-	for _, r := range records {
-		label, _, _ := strings.Cut(r.record.Name, ".")
-		svc := tailcfg.AsServiceName(serviceNamePrefix + label)
-
-		if idx != nil && slices.Contains(idx.hosts[svc], r.nodeID) {
-			addVIPRecords(r.record.Name, svc)
-
-			continue
-		}
-
-		out = append(out, r)
-	}
-
-	if s.cfg.BaseDomain != "" {
-		nodeNames := map[string]bool{}
-		for _, n := range nodes.All() {
-			nodeNames[strings.ToLower(n.GivenName())] = true
-		}
-
-		for _, svc := range s.polMan.ServiceNames() {
-			label := strings.ToLower(svc.WithoutPrefix())
-			if nodeNames[label] || len(vips[svc]) == 0 {
-				continue
-			}
-
-			addVIPRecords(label+"."+s.cfg.BaseDomain, svc)
-		}
-	}
-
-	out = slices.DeleteFunc(out, func(r claimRecord) bool {
-		return r.service == "" && vipNames[r.record.Name]
-	})
-
-	slices.SortFunc(out, func(a, b claimRecord) int {
+	slices.SortStableFunc(out, func(a, b claimRecord) int {
 		return cmp.Or(
 			strings.Compare(a.record.Name, b.record.Name),
 			strings.Compare(a.record.Type, b.record.Type),
@@ -420,7 +401,7 @@ func (s *State) withServiceRecords(records []claimRecord, nodes views.Slice[type
 		)
 	})
 
-	return slices.Compact(out)
+	return out
 }
 
 // serviceAccessFunc returns a function that reports whether the policy lets

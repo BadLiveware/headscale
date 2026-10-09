@@ -262,9 +262,10 @@ func sorted(addrs []netip.Addr) []netip.Addr {
 	return out
 }
 
-// TestServiceVIPsForClaimedNames checks that a hostnameClaims name of a
-// service with VIPs answers with the VIPs once an approved host claims it,
-// and that a service keeps its VIPs when the policy drops and restores it.
+// TestServiceVIPsForClaimedNames checks that a hostnameClaims name keeps
+// answering with the claiming host's own addresses when the service has
+// VIPs (only <label>.<base_domain> answers with the VIPs), and that a
+// service keeps its VIPs when the policy drops and restores it.
 func TestServiceVIPsForClaimedNames(t *testing.T) {
 	t.Parallel()
 
@@ -295,8 +296,11 @@ func TestServiceVIPsForClaimedNames(t *testing.T) {
 		return len(srv.State().ServiceHosts(serviceName)) == 1
 	}, serviceWait, 50*time.Millisecond, "gw becomes an active host")
 
-	viewer.WaitForCondition(t, "the claimed name answers with the VIPs", serviceWait,
-		func(nm *netmap.NetworkMap) bool { return slices.Equal(claimedAddrs(nm, claimed), sorted(vips)) })
+	viewer.WaitForCondition(t, "the claimed name answers with the host's addresses", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return slices.Equal(claimedAddrs(nm, claimed), selfAddrs(t, gw)) })
+
+	viewer.WaitForCondition(t, "the base-domain name answers with the VIPs", serviceWait,
+		func(nm *netmap.NetworkMap) bool { return slices.Equal(serviceRecords(nm), sorted(vips)) })
 
 	viewer.WaitForCondition(t, "the viewer carries the VIPs on gw", serviceWait,
 		func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw" })

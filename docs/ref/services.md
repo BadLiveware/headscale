@@ -69,8 +69,10 @@ tailscale serve advertise svc:cca  # host again
 Clients reach the service at `<label>.<dns.base_domain>`, for example `cca.example.com`, or at the VIPs.
 Only clients that the policy lets reach the service get the name and the route to the VIPs.
 When a node's MagicDNS name uses the same label, the node keeps the name and the service is reachable at its VIPs.
-A [node-claimed hostname](dns.md#node-claimed-hostnames) of the service answers with the VIPs when its claiming node is
-an approved host.
+A [node-claimed hostname](dns.md#node-claimed-hostnames) of the service still answers with the addresses of the
+claiming nodes, not with the VIPs.
+Use it where open connections must survive a drain: a client keeps the address it connected to, while a VIP move takes all
+of the client's connections at once.
 
 Tailscale v1.94 and later route to a service without options.
 Linux clients from v1.86 to v1.93 need `--accept-routes`.
