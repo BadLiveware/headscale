@@ -246,6 +246,14 @@ func (s *State) refreshServiceHostsLocked() bool {
 		next.assigned[name] = map[types.NodeID]types.NodeID{}
 	}
 
+	// Without any host before or now there is nothing to assign or move;
+	// skip the walk over every online viewer.
+	if len(next.byNode) == 0 && (prev == nil || len(prev.byNode) == 0) {
+		s.services.index.Store(next)
+
+		return false
+	}
+
 	if prev != nil {
 		for _, viewer := range nodes.All() {
 			for _, name := range names {
