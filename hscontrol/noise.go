@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	stdlog "log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -208,8 +210,13 @@ func (h *Headscale) NoiseUpgradeHandler(
 		Handler:           r,
 		ReadHeaderTimeout: types.HTTPTimeout,
 		HTTP2:             noiseHTTP2Config(h.cfg.Noise),
+		ErrorLog:          noiseHTTP2ErrorLog,
 	}
-	ns.http2Server = &http2.Server{}
+	ns.http2Server = &http2.Server{
+		CountError: func(errType string) {
+			noiseHTTP2Errors.WithLabelValues(errType).Inc()
+		},
+	}
 
 	ns.http2Server.ServeConn(
 		noiseConn,
@@ -217,6 +224,23 @@ func (h *Headscale) NoiseUpgradeHandler(
 			BaseConfig: ns.httpBaseConfig,
 		},
 	)
+}
+
+// noiseHTTP2ErrorLog sends the messages of the HTTP/2 server on Noise
+// connections, such as "timeout waiting for PING response" when it closes a
+// connection whose node stopped answering, to Headscale's logger instead of
+// the standard library's default logger.
+var noiseHTTP2ErrorLog = stdlog.New(zerologInfoWriter{component: "noise-http2"}, "", 0)
+
+// zerologInfoWriter writes each line it gets as an info message.
+type zerologInfoWriter struct {
+	component string
+}
+
+func (w zerologInfoWriter) Write(p []byte) (int, error) {
+	log.Info().Str("component", w.component).Msg(strings.TrimSpace(string(p)))
+
+	return len(p), nil
 }
 
 // noiseHTTP2Config returns the HTTP/2 settings of a Noise connection. A
