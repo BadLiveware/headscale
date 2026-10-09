@@ -311,7 +311,9 @@ func NewState(cfg *types.Config) (*State, error) {
 
 	// The first peer maps were built before the service addresses were
 	// known; hosts are peers of the nodes that may reach their services.
-	s.nodeStore.RebuildPeerMaps()
+	if s.HasServiceVIPs() {
+		s.nodeStore.RebuildPeerMaps()
+	}
 
 	// Surface nodes whose stored data would break map generation (e.g. an
 	// invalid given name from a legacy row) so an operator can fix them. This
@@ -385,7 +387,7 @@ func (s *State) ReloadPolicy() ([]change.Change, error) {
 
 	servicesChanged, err := s.loadServiceVIPs()
 	if err != nil {
-		return nil, fmt.Errorf("loading service addresses: %w", err)
+		log.Error().Err(err).Msg("loading service addresses during policy reload")
 	}
 
 	policyChanged = policyChanged || servicesChanged
@@ -1072,7 +1074,7 @@ func (s *State) SetNodeTags(nodeID types.NodeID, tags []string) (types.NodeView,
 	// Setting OriginNode ensures the node gets a self-update with the new tags.
 	c.OriginNode = nodeID
 
-	return nodeView, c.Merge(s.refreshHostnameClaims()), nil
+	return nodeView, c, nil
 }
 
 // SetApprovedRoutes sets the network routes that a node is approved to advertise.
@@ -1165,7 +1167,8 @@ func (s *State) RenameNode(nodeID types.NodeID, newName string) (types.NodeView,
 		c = change.NodeAdded(nodeID)
 	}
 
-	return nodeView, c, nil
+	// A node name can hide or free the MagicDNS name of a service.
+	return nodeView, c.Merge(s.refreshHostnameClaims()), nil
 }
 
 // BackfillNodeIPs assigns IP addresses to nodes that don't have them. The
@@ -1344,7 +1347,7 @@ func (s *State) SetPolicy(pol []byte) (bool, error) {
 
 	servicesChanged, err := s.loadServiceVIPs()
 	if err != nil {
-		return changed, fmt.Errorf("loading service addresses: %w", err)
+		log.Error().Err(err).Msg("loading service addresses after a policy change")
 	}
 
 	changed = changed || servicesChanged

@@ -1,12 +1,14 @@
 package state
 
 import (
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"tailscale.com/tailcfg"
 )
 
 const (
@@ -28,15 +30,15 @@ func TestNextServiceHostKeepsHostOnJoin(t *testing.T) {
 	four := testHosts(4)
 
 	for v := types.NodeID(1); v <= testViewers; v++ {
-		cur, ok := chooseServiceHost(v, three, four)
+		cur, ok := chooseServiceHost(v, three, sees(four))
 		require.True(t, ok)
 
-		got, ok := nextServiceHost(v, cur, true, four, four, false)
+		got, ok := nextServiceHost(v, cur, true, four, sees(four), false)
 		require.True(t, ok)
 		assert.Equal(t, cur, got, "a joining host takes no client at once")
 
-		rendezvous, _ := chooseServiceHost(v, four, four)
-		got, _ = nextServiceHost(v, cur, true, four, four, true)
+		rendezvous, _ := chooseServiceHost(v, four, sees(four))
+		got, _ = nextServiceHost(v, cur, true, four, sees(four), true)
 		assert.Equal(t, rendezvous, got, "during the startup grace a client follows rendezvous")
 	}
 }
@@ -47,9 +49,9 @@ func TestNextServiceHostMovesOnlyClientsOfALeavingHost(t *testing.T) {
 	three := []types.NodeID{four[0], four[1], four[3]}
 
 	for v := types.NodeID(1); v <= testViewers; v++ {
-		cur, _ := chooseServiceHost(v, four, four)
+		cur, _ := chooseServiceHost(v, four, sees(four))
 
-		got, ok := nextServiceHost(v, cur, true, three, four, false)
+		got, ok := nextServiceHost(v, cur, true, three, sees(four), false)
 		require.True(t, ok)
 
 		if cur == leaving {
@@ -74,7 +76,7 @@ func TestNextServiceHostStartupGrace(t *testing.T) {
 
 			for v := types.NodeID(1); v <= testViewers; v++ {
 				cur, has := assigned[v]
-				if h, ok := nextServiceHost(v, cur, has, active, hosts, follow); ok {
+				if h, ok := nextServiceHost(v, cur, has, active, sees(hosts), follow); ok {
 					assigned[v] = h
 				}
 			}
@@ -111,13 +113,13 @@ func TestPlanRebalanceAfterJoin(t *testing.T) {
 
 	assigned := map[types.NodeID]types.NodeID{}
 	for v := types.NodeID(1); v <= testViewers; v++ {
-		assigned[v], _ = chooseServiceHost(v, three, three)
+		assigned[v], _ = chooseServiceHost(v, three, sees(three))
 	}
 
 	clientsNow := func() []serviceClient {
 		clients := make([]serviceClient, 0, testViewers)
 		for v := types.NodeID(1); v <= testViewers; v++ {
-			to, _ := chooseServiceHost(v, four, four)
+			to, _ := chooseServiceHost(v, four, sees(four))
 			clients = append(clients, serviceClient{viewer: v, from: assigned[v], to: to})
 		}
 
@@ -127,7 +129,7 @@ func TestPlanRebalanceAfterJoin(t *testing.T) {
 	rounds, total := 0, 0
 
 	for ; rounds < testViewers; rounds++ {
-		moves := planRebalance(clientsNow(), perHost, tolerance)
+		moves := planRebalance(clientsNow(), func(types.NodeID) int { return perHost }, tolerance)
 		if len(moves) == 0 {
 			break
 		}
@@ -172,14 +174,38 @@ func TestPlanRebalanceNothingWithinTolerance(t *testing.T) {
 		{viewer: 3, from: 11, to: 11},
 	}
 
-	assert.Empty(t, planRebalance(clients, 5, 0.5), "a spread within tolerance moves nobody")
-	assert.Len(t, planRebalance(clients, 5, 0), 1, "with no tolerance the client moves to its target")
+	assert.Empty(t, planRebalance(clients, func(types.NodeID) int { return 5 }, 0.5), "a spread within tolerance moves nobody")
+	assert.Len(t, planRebalance(clients, func(types.NodeID) int { return 5 }, 0), 1, "with no tolerance the client moves to its target")
 }
 
-func TestRebalanceMovesPerHost(t *testing.T) {
-	cfg := types.ServicesRebalanceConfig{Interval: 10 * time.Second, MovesPerHostPerMinute: 12}
-	assert.Equal(t, 2, rebalanceMovesPerHost(cfg), "12 per minute at a 10 s interval")
+func TestRebalanceBudgetCarriesFraction(t *testing.T) {
+	hosts := map[types.NodeID][]tailcfg.ServiceName{testFirstHost: nil}
 
-	cfg.MovesPerHostPerMinute = 1
-	assert.Equal(t, 1, rebalanceMovesPerHost(cfg), "at least one per round")
+	var sv services
+
+	// 12 per minute at a 10 s interval: two moves every round.
+	budget := sv.rebalanceBudget(types.ServicesRebalanceConfig{Interval: 10 * time.Second, MovesPerHostPerMinute: 12}, hosts)
+	assert.Equal(t, 2, budget(testFirstHost))
+
+	// 6 per minute at a 1 s interval: one move every 10 rounds, never more.
+	cfg := types.ServicesRebalanceConfig{Interval: time.Second, MovesPerHostPerMinute: 6}
+	sv = services{}
+	moves := 0
+
+	for range 60 {
+		if sv.rebalanceBudget(cfg, hosts)(testFirstHost) >= 1 {
+			sv.credit[testFirstHost]--
+			moves++
+		}
+	}
+
+	assert.Equal(t, 6, moves, "the configured rate holds for a short interval")
+}
+
+// sees returns a visibility function over sorted peers.
+func sees(peers []types.NodeID) func(types.NodeID) bool {
+	return func(h types.NodeID) bool {
+		_, ok := slices.BinarySearch(peers, h)
+		return ok
+	}
 }

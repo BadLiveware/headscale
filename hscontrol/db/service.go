@@ -75,41 +75,30 @@ func (hsdb *HSDatabase) ListServices() ([]types.Service, error) {
 	})
 }
 
-// CreateServices allocates virtual IP addresses for each named service and
-// stores them. The caller passes only names without a row. Addresses come
-// from the node allocator, so a VIP never collides with a node address.
-func (hsdb *HSDatabase) CreateServices(alloc *IPAllocator, names []string) ([]types.Service, error) {
-	if len(names) == 0 {
-		return nil, nil
+// CreateService allocates virtual IP addresses for a service and stores
+// them. Addresses come from the node allocator, so a VIP never collides
+// with a node address. On any failure, the allocated addresses go back to
+// the allocator.
+func (hsdb *HSDatabase) CreateService(alloc *IPAllocator, name string) (types.Service, error) {
+	ipv4, ipv6, err := alloc.Next()
+	if err != nil {
+		return types.Service{}, fmt.Errorf("allocating addresses for %q: %w", name, err)
 	}
 
-	return Write(hsdb.DB, func(tx *gorm.DB) ([]types.Service, error) {
-		created := make([]types.Service, 0, len(names))
+	if ipv4 == nil && ipv6 == nil {
+		return types.Service{}, fmt.Errorf("%w: %q", errServiceVIPsMissing, name)
+	}
 
-		for _, name := range names {
-			ipv4, ipv6, err := alloc.Next()
-			if err != nil {
-				return nil, fmt.Errorf("allocating addresses for %q: %w", name, err)
-			}
+	svc := types.Service{Name: name, IPv4: ipv4, IPv6: ipv6}
 
-			if ipv4 == nil && ipv6 == nil {
-				return nil, fmt.Errorf("%w: %q", errServiceVIPsMissing, name)
-			}
+	err = hsdb.DB.Create(&svc).Error
+	if err != nil {
+		alloc.FreeIPs(addrsOf(ipv4, ipv6))
 
-			svc := types.Service{Name: name, IPv4: ipv4, IPv6: ipv6}
+		return types.Service{}, fmt.Errorf("storing service %q: %w", name, err)
+	}
 
-			err = tx.Create(&svc).Error
-			if err != nil {
-				alloc.FreeIPs(addrsOf(ipv4, ipv6))
-
-				return nil, fmt.Errorf("storing service %q: %w", name, err)
-			}
-
-			created = append(created, svc)
-		}
-
-		return created, nil
-	})
+	return svc, nil
 }
 
 func addrsOf(addrs ...*netip.Addr) []netip.Addr {

@@ -284,7 +284,7 @@ func (pm *PolicyManager) updateLocked() (bool, error) {
 	refreshNodeAttrs := pm.pol == nil ||
 		len(pm.pol.NodeAttrs) > 0 ||
 		pm.pol.RandomizeClientPort ||
-		len(pm.serviceVIPs) > 0 ||
+		len(pm.pol.AutoApprovers.Services) > 0 ||
 		len(pm.nodeAttrsHashes) > 0
 
 	var nodeAttrs map[types.NodeID]tailcfg.NodeCapMap

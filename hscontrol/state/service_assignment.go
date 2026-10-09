@@ -12,27 +12,41 @@ import (
 	"tailscale.com/tailcfg"
 )
 
+// visibleTo returns a function that reports whether viewer sees an active
+// host, from the host's sorted peers.
+func (idx *serviceHostIndex) visibleTo(viewer types.NodeID) func(types.NodeID) bool {
+	return func(host types.NodeID) bool {
+		_, ok := slices.BinarySearch(idx.hostPeers[host], viewer)
+		return ok
+	}
+}
+
+// assign records that viewer keeps host for the service although its
+// rendezvous choice differs.
+func (idx *serviceHostIndex) assign(name tailcfg.ServiceName, viewer, host types.NodeID) {
+	if idx.assigned[name] == nil {
+		idx.assigned[name] = map[types.NodeID]types.NodeID{}
+	}
+
+	idx.assigned[name][viewer] = host
+}
+
 // hostFor returns the host viewer uses for the service: its assigned host
 // while that host is active and visible to viewer, else its rendezvous
 // choice. A nil index has no host.
-func (idx *serviceHostIndex) hostFor(
-	viewer types.NodeID,
-	name tailcfg.ServiceName,
-	peers []types.NodeID,
-) (types.NodeID, bool) {
+func (idx *serviceHostIndex) hostFor(viewer types.NodeID, name tailcfg.ServiceName) (types.NodeID, bool) {
 	if idx == nil {
 		return 0, false
 	}
 
 	hosts := idx.hosts[name]
+	visible := idx.visibleTo(viewer)
 
-	if h, ok := idx.assigned[name][viewer]; ok && slices.Contains(hosts, h) {
-		if _, visible := slices.BinarySearch(peers, h); visible {
-			return h, true
-		}
+	if h, ok := idx.assigned[name][viewer]; ok && slices.Contains(hosts, h) && visible(h) {
+		return h, true
 	}
 
-	return chooseServiceHost(viewer, hosts, peers)
+	return chooseServiceHost(viewer, hosts, visible)
 }
 
 // nextServiceHost returns the host a viewer uses after a change of the
@@ -43,16 +57,15 @@ func (idx *serviceHostIndex) hostFor(
 func nextServiceHost(
 	viewer, current types.NodeID,
 	hasCurrent bool,
-	hosts, peers []types.NodeID,
+	hosts []types.NodeID,
+	visible func(types.NodeID) bool,
 	follow bool,
 ) (types.NodeID, bool) {
-	if !follow && hasCurrent && slices.Contains(hosts, current) {
-		if _, visible := slices.BinarySearch(peers, current); visible {
-			return current, true
-		}
+	if !follow && hasCurrent && slices.Contains(hosts, current) && visible(current) {
+		return current, true
 	}
 
-	return chooseServiceHost(viewer, hosts, peers)
+	return chooseServiceHost(viewer, hosts, visible)
 }
 
 // serviceClient is one viewer's assigned host and its rendezvous target.
@@ -86,7 +99,7 @@ func withinTolerance(actual, target map[types.NodeID]int, tolerance float64) boo
 // most perHost from each host, only from hosts that have more clients than
 // their share, the most loaded first, and stops once every host is within
 // tolerance. It returns the moves in a stable order.
-func planRebalance(clients []serviceClient, perHost int, tolerance float64) []serviceClient {
+func planRebalance(clients []serviceClient, budget func(types.NodeID) int, tolerance float64) []serviceClient {
 	actual := map[types.NodeID]int{}
 	target := map[types.NodeID]int{}
 
@@ -121,7 +134,7 @@ func planRebalance(clients []serviceClient, perHost int, tolerance float64) []se
 			break
 		}
 
-		if taken[c.from] >= perHost || actual[c.from] <= target[c.from] {
+		if taken[c.from] >= budget(c.from) || actual[c.from] <= target[c.from] {
 			continue
 		}
 
@@ -135,16 +148,39 @@ func planRebalance(clients []serviceClient, perHost int, tolerance float64) []se
 	return moves
 }
 
-// rebalanceMovesPerHost is how many clients one rebalance may take from a
-// host: the per-minute rate spread over the interval, at least one.
-func rebalanceMovesPerHost(cfg types.ServicesRebalanceConfig) int {
-	return max(1, int(float64(cfg.MovesPerHostPerMinute)*cfg.Interval.Minutes()))
+// rebalanceCreditEpsilon absorbs float rounding, so ten rounds of 0.1
+// credit make one move.
+const rebalanceCreditEpsilon = 1e-9
+
+// rebalanceBudget adds one round of credit to every active host and
+// returns how many whole moves each host may give up this round. The rate
+// is moves_per_host_per_minute × interval, and the fraction carries over
+// between rounds, so a short interval does not exceed the configured rate.
+// The credit is capped at one round (at least one move), so a host does
+// not save up a burst while nothing needs moving.
+func (sv *services) rebalanceBudget(
+	cfg types.ServicesRebalanceConfig,
+	hosts map[types.NodeID][]tailcfg.ServiceName,
+) func(types.NodeID) int {
+	perRound := float64(cfg.MovesPerHostPerMinute) * cfg.Interval.Minutes()
+	limit := math.Max(1, perRound)
+
+	credit := make(map[types.NodeID]float64, len(hosts))
+	for h := range hosts {
+		credit[h] = math.Min(limit, sv.credit[h]+perRound)
+	}
+
+	sv.credit = credit
+
+	return func(h types.NodeID) int {
+		return int(credit[h] + rebalanceCreditEpsilon)
+	}
 }
 
 // RebalanceServices moves a bounded number of clients towards their
 // rendezvous host, after a host joined. Clients keep their host otherwise,
 // so without it a joining host would only get new clients. It reports
-// whether it queued changes; the callers of [State.OnServiceHostsMoved]
+// whether it queued changes; the callbacks of [State.OnServiceHostsMoved]
 // are run, so the caller need not dispatch.
 func (s *State) RebalanceServices() bool {
 	if s.cfg.Services.Rebalance.Interval <= 0 || s.followRendezvous() {
@@ -160,73 +196,70 @@ func (s *State) RebalanceServices() bool {
 	return true
 }
 
+// rebalanceServicesLocked plans and applies one round. Only clients with an
+// assignment differ from their rendezvous host, so a round without
+// assignments costs nothing, and a round over an index that was balanced
+// in the last round is skipped.
 func (s *State) rebalanceServicesLocked() bool {
 	s.services.mu.Lock()
 	defer s.services.mu.Unlock()
 
 	idx := s.services.index.Load()
-	if idx == nil {
+	if idx == nil || idx == s.services.balanced || !hasAssignments(idx) {
 		return false
 	}
 
-	perHost := rebalanceMovesPerHost(s.cfg.Services.Rebalance)
+	budget := s.services.rebalanceBudget(s.cfg.Services.Rebalance, idx.byNode)
 	nodes := s.nodeStore.ListNodes()
 
 	next := &serviceHostIndex{
-		hosts:    idx.hosts,
-		byNode:   idx.byNode,
-		assigned: make(map[tailcfg.ServiceName]map[types.NodeID]types.NodeID, len(idx.assigned)),
+		hosts:     idx.hosts,
+		byNode:    idx.byNode,
+		hostPeers: idx.hostPeers,
+		assigned:  make(map[tailcfg.ServiceName]map[types.NodeID]types.NodeID, len(idx.assigned)),
 	}
 
 	for name, viewers := range idx.assigned {
 		next.assigned[name] = maps.Clone(viewers)
 	}
 
-	peersOf := map[types.NodeID][]types.NodeID{}
 	moved := map[types.NodeID][]types.NodeID{}
 
-	for _, name := range slices.Sorted(maps.Keys(idx.hosts)) {
-		if len(idx.hosts[name]) < 2 {
+	for _, name := range slices.Sorted(maps.Keys(idx.assigned)) {
+		if len(idx.assigned[name]) == 0 || len(idx.hosts[name]) < 2 {
 			continue
 		}
 
 		var clients []serviceClient
 
 		for _, viewer := range nodes.All() {
-			if !viewer.Online() {
+			if !viewer.Online() || !s.mayReachService(viewer, name) {
 				continue
 			}
 
-			peers, ok := peersOf[viewer.ID()]
-			if !ok {
-				peers = s.nodeStore.ListPeerIDs(viewer.ID())
-				peersOf[viewer.ID()] = peers
-			}
-
-			from, ok := idx.hostFor(viewer.ID(), name, peers)
+			from, ok := idx.hostFor(viewer.ID(), name)
 			if !ok {
 				continue
 			}
 
-			to, _ := chooseServiceHost(viewer.ID(), idx.hosts[name], peers)
+			to, _ := chooseServiceHost(viewer.ID(), idx.hosts[name], idx.visibleTo(viewer.ID()))
 			clients = append(clients, serviceClient{viewer: viewer.ID(), from: from, to: to})
 		}
 
-		for _, m := range planRebalance(clients, perHost, s.cfg.Services.Rebalance.Tolerance) {
-			if next.assigned[name] == nil {
-				next.assigned[name] = map[types.NodeID]types.NodeID{}
-			}
-
-			next.assigned[name][m.viewer] = m.to
+		for _, m := range planRebalance(clients, budget, s.cfg.Services.Rebalance.Tolerance) {
+			s.services.credit[m.from]--
+			delete(next.assigned[name], m.viewer)
 			moved[m.viewer] = append(moved[m.viewer], m.from, m.to)
 		}
 	}
 
-	s.services.index.Store(next)
-
 	if len(moved) == 0 {
+		s.services.balanced = idx
+
 		return false
 	}
+
+	s.services.index.Store(next)
 
 	queued := make([]change.Change, 0, len(moved))
 
@@ -241,4 +274,14 @@ func (s *State) rebalanceServicesLocked() bool {
 	s.queueServiceMoves(queued)
 
 	return true
+}
+
+func hasAssignments(idx *serviceHostIndex) bool {
+	for _, viewers := range idx.assigned {
+		if len(viewers) > 0 {
+			return true
+		}
+	}
+
+	return false
 }

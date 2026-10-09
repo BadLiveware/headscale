@@ -23,9 +23,14 @@ func testServicesStableAndDisjoint(t *testing.T, db *HSDatabase) {
 	node := types.Node{Hostname: "node", IPv4: nodeV4, IPv6: nodeV6}
 	require.NoError(t, db.DB.Save(&node).Error)
 
-	created, err := db.CreateServices(alloc, []string{"svc:grafana", "svc:gitea"})
-	require.NoError(t, err)
-	require.Len(t, created, 2)
+	created := make([]types.Service, 0, 2)
+
+	for _, name := range []string{"svc:grafana", "svc:gitea"} {
+		svc, err := db.CreateService(alloc, name)
+		require.NoError(t, err)
+
+		created = append(created, svc)
+	}
 
 	used := map[netip.Addr]string{*nodeV4: "node", *nodeV6: "node"}
 
@@ -39,7 +44,7 @@ func testServicesStableAndDisjoint(t *testing.T, db *HSDatabase) {
 		}
 	}
 
-	_, err = db.CreateServices(alloc, []string{"svc:grafana"})
+	_, err = db.CreateService(alloc, "svc:grafana")
 	require.Error(t, err, "a service name is unique")
 
 	listed, err := db.ListServices()

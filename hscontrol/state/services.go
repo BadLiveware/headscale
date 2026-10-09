@@ -15,6 +15,8 @@ import (
 	"github.com/juanfont/headscale/hscontrol/policy/matcher"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/types/change"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/rs/zerolog/log"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/views"
@@ -27,13 +29,21 @@ type serviceVIPMap map[tailcfg.ServiceName][]netip.Addr
 type serviceHostMap map[tailcfg.ServiceName][]types.NodeID
 
 // serviceHostIndex is the set of active service hosts, indexed both ways,
-// and the host each client is assigned to. It is immutable once stored.
+// and the clients that use another host than their rendezvous choice. It
+// is immutable once stored.
 type serviceHostIndex struct {
 	hosts  serviceHostMap
 	byNode map[types.NodeID][]tailcfg.ServiceName
 
-	// assigned is the host each viewer uses per service. A viewer keeps it
-	// while that host is active and visible, see [serviceHostIndex.hostFor].
+	// hostPeers holds the sorted peer IDs of each active host. Peer
+	// visibility is symmetric, so "viewer sees host" is a binary search
+	// here instead of a copy and sort of the viewer's peers.
+	hostPeers map[types.NodeID][]types.NodeID
+
+	// assigned holds, per service, the viewers that keep a host other than
+	// their rendezvous choice (sticky after a host joined, until the
+	// rebalance moves them). Every other viewer uses its rendezvous
+	// choice, see [serviceHostIndex.hostFor].
 	assigned map[tailcfg.ServiceName]map[types.NodeID]types.NodeID
 }
 
@@ -60,54 +70,97 @@ type services struct {
 
 	// startedAt starts the startup grace, see [State.followRendezvous].
 	startedAt time.Time
+
+	// balanced is the index the last rebalance round found nothing to
+	// move in; the next rounds skip it until a refresh stores a new one.
+	balanced *serviceHostIndex
+
+	// credit is the fractional rebalance budget per host, see
+	// [services.rebalanceBudget]. Guarded by mu.
+	credit map[types.NodeID]float64
 }
 
-// loadServiceVIPs reads the stored VIPs, allocates VIPs for the services
-// the policy defines that have none yet, and gives the result to the policy
-// manager. It reports whether the policy manager needs to update nodes.
+// serviceVIPAllocationFailures counts services the policy defines that
+// got no VIPs, for example because the address pool is exhausted.
+var serviceVIPAllocationFailures = promauto.NewCounter(prometheus.CounterOpts{
+	Namespace: prometheusNamespace,
+	Name:      "service_vip_allocation_failures_total",
+	Help:      "Total number of failed virtual IP allocations for Tailscale Services",
+})
+
+// loadServiceVIPs reads the stored VIPs on first use, allocates VIPs for
+// the services the policy defines that have none yet, and gives the result
+// to the policy manager when it changed. It reports whether the policy
+// manager needs to update nodes.
+//
+// A failed allocation does not fail the caller: the service stays without
+// VIPs (its svc: destinations resolve to nothing, so it fails closed), the
+// failure is logged and counted, and the next policy load tries again.
+// Only a failure to read the stored VIPs is returned.
 func (s *State) loadServiceVIPs() (bool, error) {
 	s.services.mu.Lock()
 	defer s.services.mu.Unlock()
 
+	first := s.services.vips.Load() == nil
 	vips := serviceVIPMap{}
-	if p := s.services.vips.Load(); p != nil {
-		vips = maps.Clone(*p)
-	} else {
+
+	if first {
 		stored, err := s.db.ListServices()
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("reading service addresses: %w", err)
 		}
 
 		for i := range stored {
 			vips[stored[i].ServiceName()] = stored[i].VIPs()
 		}
+	} else {
+		vips = maps.Clone(*s.services.vips.Load())
 	}
 
-	var missing []string
+	created := 0
 
 	for _, name := range s.polMan.ServiceNames() {
-		if _, ok := vips[name]; !ok {
-			missing = append(missing, name.String())
+		if _, ok := vips[name]; ok {
+			continue
 		}
-	}
 
-	created, err := s.db.CreateServices(s.ipAlloc, missing)
-	if err != nil {
-		return false, fmt.Errorf("allocating service addresses: %w", err)
-	}
+		svc, err := s.db.CreateService(s.ipAlloc, name.String())
+		if err != nil {
+			serviceVIPAllocationFailures.Inc()
+			log.Error().
+				Err(err).
+				Str("service", name.String()).
+				Msg("service has no virtual IP addresses; clients cannot reach it until an allocation succeeds")
 
-	for i := range created {
+			continue
+		}
+
 		log.Info().
-			Str("service", created[i].Name).
-			Interface("addresses", created[i].VIPs()).
+			Str("service", svc.Name).
+			Interface("addresses", svc.VIPs()).
 			Msg("allocated service virtual IP addresses")
 
-		vips[created[i].ServiceName()] = created[i].VIPs()
+		vips[name] = svc.VIPs()
+		created++
 	}
 
 	s.services.vips.Store(&vips)
 
+	// The policy manager keeps the VIPs across policy changes; it only
+	// needs them again when they changed. Without any service this costs
+	// nothing.
+	if created == 0 && (!first || len(vips) == 0) {
+		return false, nil
+	}
+
 	return s.polMan.SetServiceVIPs(vips)
+}
+
+// HasServiceVIPs reports whether any service has VIPs.
+func (s *State) HasServiceVIPs() bool {
+	p := s.services.vips.Load()
+
+	return p != nil && len(*p) > 0
 }
 
 // ServiceVIPs returns the VIPs of a service, or nil.
@@ -129,9 +182,10 @@ func deriveServiceHosts(
 	vips serviceVIPMap,
 ) *serviceHostIndex {
 	idx := &serviceHostIndex{
-		hosts:    serviceHostMap{},
-		byNode:   map[types.NodeID][]tailcfg.ServiceName{},
-		assigned: map[tailcfg.ServiceName]map[types.NodeID]types.NodeID{},
+		hosts:     serviceHostMap{},
+		byNode:    map[types.NodeID][]tailcfg.ServiceName{},
+		hostPeers: map[types.NodeID][]types.NodeID{},
+		assigned:  map[tailcfg.ServiceName]map[types.NodeID]types.NodeID{},
 	}
 
 	if len(vips) == 0 {
@@ -165,11 +219,10 @@ func deriveServiceHosts(
 }
 
 // chooseServiceHost returns the host of a service that viewer sends the
-// service's traffic to: among the hosts viewer can see (peers, sorted), the
-// one with the highest rendezvous score for viewer. Every viewer gets a
-// stable host; viewers spread evenly; when a host leaves, only its viewers
-// move.
-func chooseServiceHost(viewer types.NodeID, hosts, peers []types.NodeID) (types.NodeID, bool) {
+// service's traffic to: among the hosts viewer can see, the one with the
+// highest rendezvous score for viewer. Every viewer gets a stable host;
+// viewers spread evenly; when a host leaves, only its viewers move.
+func chooseServiceHost(viewer types.NodeID, hosts []types.NodeID, visible func(types.NodeID) bool) (types.NodeID, bool) {
 	var (
 		best      types.NodeID
 		bestScore uint64
@@ -177,7 +230,7 @@ func chooseServiceHost(viewer types.NodeID, hosts, peers []types.NodeID) (types.
 	)
 
 	for _, h := range hosts {
-		if _, ok := slices.BinarySearch(peers, h); !ok {
+		if !visible(h) {
 			continue
 		}
 
@@ -224,63 +277,84 @@ func (s *State) followRendezvous() bool {
 	return time.Since(s.services.startedAt) < s.cfg.Services.StartupGrace
 }
 
+// sameHostView reports whether a and b have the same active hosts with the
+// same peers, so every viewer's host is the same in both.
+func sameHostView(a, b *serviceHostIndex) bool {
+	if a == nil || len(a.hosts) != len(b.hosts) || len(a.hostPeers) != len(b.hostPeers) {
+		return false
+	}
+
+	for name, hosts := range b.hosts {
+		if !slices.Equal(a.hosts[name], hosts) {
+			return false
+		}
+	}
+
+	for h, peers := range b.hostPeers {
+		if !slices.Equal(a.hostPeers[h], peers) {
+			return false
+		}
+	}
+
+	return true
+}
+
 // refreshServiceHostsLocked does the work of [State.refreshServiceHosts]
-// under the services lock and reports whether it queued changes.
+// under the services lock and reports whether it queued changes. When the
+// active hosts and their peers are unchanged, no viewer's host can change,
+// and it returns without walking the viewers.
 func (s *State) refreshServiceHostsLocked() bool {
+	s.services.mu.Lock()
+	defer s.services.mu.Unlock()
+
 	vips := s.services.vips.Load()
 	if vips == nil {
 		return false
 	}
 
-	s.services.mu.Lock()
-	defer s.services.mu.Unlock()
-
 	nodes := s.nodeStore.ListNodes()
 	next := deriveServiceHosts(nodes, s.polMan.NodeServices, *vips)
-	prev := s.services.index.Load()
-	follow := s.followRendezvous()
 
-	names := slices.Sorted(maps.Keys(*vips))
-
-	for _, name := range names {
-		next.assigned[name] = map[types.NodeID]types.NodeID{}
+	for h := range next.byNode {
+		next.hostPeers[h] = s.nodeStore.ListPeerIDs(h)
 	}
 
-	// Without any host before or now there is nothing to assign or move;
-	// skip the walk over every online viewer.
-	if len(next.byNode) == 0 && (prev == nil || len(prev.byNode) == 0) {
-		s.services.index.Store(next)
-
+	prev := s.services.index.Load()
+	if sameHostView(prev, next) {
 		return false
 	}
 
-	if prev != nil {
-		for _, viewer := range nodes.All() {
-			for _, name := range names {
-				if h, ok := prev.assigned[name][viewer.ID()]; ok && !viewer.Online() {
-					next.assigned[name][viewer.ID()] = h
-				}
-			}
-		}
-	}
+	follow := s.followRendezvous()
 
 	var queued []change.Change
 
 	for _, viewer := range nodes.All() {
 		if !viewer.Online() {
+			s.keepOfflineAssignments(prev, next, viewer.ID())
+
 			continue
 		}
 
-		peers := s.nodeStore.ListPeerIDs(viewer.ID())
+		visibleNext := next.visibleTo(viewer.ID())
 
 		var moved []types.NodeID
 
-		for _, name := range names {
-			oldHost, hadOld := prev.hostFor(viewer.ID(), name, peers)
-			newHost, hasNew := nextServiceHost(viewer.ID(), oldHost, hadOld, next.hosts[name], peers, follow)
+		for name := range *vips {
+			if len(next.hosts[name]) == 0 && (prev == nil || len(prev.hosts[name]) == 0) {
+				continue
+			}
+
+			if !s.mayReachService(viewer, name) {
+				continue
+			}
+
+			oldHost, hadOld := prev.hostFor(viewer.ID(), name)
+			newHost, hasNew := nextServiceHost(viewer.ID(), oldHost, hadOld, next.hosts[name], visibleNext, follow)
 
 			if hasNew {
-				next.assigned[name][viewer.ID()] = newHost
+				if target, _ := chooseServiceHost(viewer.ID(), next.hosts[name], visibleNext); target != newHost {
+					next.assign(name, viewer.ID(), newHost)
+				}
 			}
 
 			if hadOld == hasNew && oldHost == newHost {
@@ -319,6 +393,37 @@ func (s *State) refreshServiceHostsLocked() bool {
 	s.queueServiceMoves(queued)
 
 	return true
+}
+
+// keepOfflineAssignments carries an offline viewer's sticky hosts into
+// next, so it keeps them when it reconnects.
+func (s *State) keepOfflineAssignments(prev, next *serviceHostIndex, viewer types.NodeID) {
+	if prev == nil {
+		return
+	}
+
+	for name, viewers := range prev.assigned {
+		if h, ok := viewers[viewer]; ok {
+			next.assign(name, viewer, h)
+		}
+	}
+}
+
+// mayReachService reports whether the policy lets viewer reach any of the
+// service's VIPs.
+func (s *State) mayReachService(viewer types.NodeView, name tailcfg.ServiceName) bool {
+	matchers, err := s.polMan.MatchersForNode(viewer)
+	if err != nil {
+		return false
+	}
+
+	for _, addr := range s.ServiceVIPs(name) {
+		if viewer.CanAccessRoute(matchers, netip.PrefixFrom(addr, addr.BitLen())) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (s *State) queueServiceMoves(cs []change.Change) {
@@ -366,12 +471,10 @@ func (s *State) serviceRoutesForPeer(
 		return nil
 	}
 
-	peers := s.nodeStore.ListPeerIDs(viewer.ID())
-
 	var routes []netip.Prefix
 
 	for _, name := range hosted {
-		chosen, ok := idx.hostFor(viewer.ID(), name, peers)
+		chosen, ok := idx.hostFor(viewer.ID(), name)
 		if !ok || chosen != peer.ID() {
 			continue
 		}
@@ -396,7 +499,7 @@ func (s *State) ServiceHostFor(viewer types.NodeID, name tailcfg.ServiceName) (t
 		return 0, false
 	}
 
-	return idx.hostFor(viewer, name, s.nodeStore.ListPeerIDs(viewer))
+	return idx.hostFor(viewer, name)
 }
 
 // ServiceHosts returns the sorted IDs of the active hosts of a service.
@@ -438,9 +541,7 @@ func (s *State) withServiceRecords(records []claimRecord, nodes views.Slice[type
 		}
 
 		if nodeNames[label] {
-			log.Warn().
-				Str("service", svc.String()).
-				Msg("service name not published: a node uses the same MagicDNS name")
+			s.warnServiceNameOnce(svc)
 
 			continue
 		}
@@ -472,6 +573,26 @@ func (s *State) withServiceRecords(records []claimRecord, nodes views.Slice[type
 	})
 
 	return out
+}
+
+// warnServiceNameOnce logs once per service that its MagicDNS name is not
+// published because a node uses it. Called under claims.mu, which guards
+// claims.warned.
+func (s *State) warnServiceNameOnce(svc tailcfg.ServiceName) {
+	key := svc.String()
+	if _, done := s.claims.warned[key]; done {
+		return
+	}
+
+	if s.claims.warned == nil {
+		s.claims.warned = make(map[string]struct{})
+	}
+
+	s.claims.warned[key] = struct{}{}
+
+	log.Warn().
+		Str("service", key).
+		Msg("service name not published: a node uses the same MagicDNS name")
 }
 
 // serviceAccessFunc returns a function that reports whether the policy lets

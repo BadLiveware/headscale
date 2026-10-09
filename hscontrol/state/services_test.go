@@ -26,7 +26,7 @@ func TestChooseServiceHostSpreadAndMovement(t *testing.T) {
 	count := map[types.NodeID]int{}
 
 	for v := range types.NodeID(viewers) {
-		h, ok := chooseServiceHost(v+1, hosts, allPeers)
+		h, ok := chooseServiceHost(v+1, hosts, sees(allPeers))
 		require.True(t, ok)
 
 		before[v+1] = h
@@ -44,7 +44,7 @@ func TestChooseServiceHostSpreadAndMovement(t *testing.T) {
 	remaining := slices.DeleteFunc(slices.Clone(hosts), func(h types.NodeID) bool { return h == leaving })
 
 	for v, old := range before {
-		h, ok := chooseServiceHost(v, remaining, allPeers)
+		h, ok := chooseServiceHost(v, remaining, sees(allPeers))
 		require.True(t, ok)
 
 		if old != leaving {
@@ -56,7 +56,7 @@ func TestChooseServiceHostSpreadAndMovement(t *testing.T) {
 
 	// A returning host gets back exactly its viewers.
 	for v, old := range before {
-		h, _ := chooseServiceHost(v, hosts, allPeers)
+		h, _ := chooseServiceHost(v, hosts, sees(allPeers))
 		assert.Equal(t, old, h)
 	}
 }
@@ -64,10 +64,10 @@ func TestChooseServiceHostSpreadAndMovement(t *testing.T) {
 func TestChooseServiceHostOnlyVisibleHosts(t *testing.T) {
 	hosts := []types.NodeID{10, 11, 12}
 
-	_, ok := chooseServiceHost(1, hosts, []types.NodeID{2, 3})
+	_, ok := chooseServiceHost(1, hosts, sees([]types.NodeID{2, 3}))
 	assert.False(t, ok, "a viewer that sees no host gets none")
 
-	h, ok := chooseServiceHost(1, hosts, []types.NodeID{11})
+	h, ok := chooseServiceHost(1, hosts, sees([]types.NodeID{11}))
 	require.True(t, ok)
 	assert.Equal(t, types.NodeID(11), h, "only a visible host can be chosen")
 }
