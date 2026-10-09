@@ -287,11 +287,18 @@ func (m *mapper) selfMapResponse(
 	nodeID types.NodeID,
 	capVer tailcfg.CapabilityVersion,
 ) (*tailcfg.MapResponse, error) {
-	ma, err := m.NewMapResponseBuilder(nodeID).
+	builder := m.NewMapResponseBuilder(nodeID).
 		WithDebugType(selfResponseDebug).
 		WithCapabilityVersion(capVer).
-		WithSelfNode().
-		Build()
+		WithSelfNode()
+
+	// A self update follows a change to the node itself, such as its tags,
+	// which can change its own claims; see policyChangeResponse.
+	if m.state.HostnameClaimsInUse() {
+		builder.WithDNSConfig()
+	}
+
+	ma, err := builder.Build()
 	if err != nil {
 		return nil, err
 	}
@@ -316,9 +323,13 @@ func (m *mapper) selfMapResponse(
 // DNSConfig is left out: it forces clients into a full netmap rebuild, and
 // the node's DNS config inputs arrive with its own [change.SelfUpdate], see
 // [state.State.DrainSelfRefreshes]. The exception is node-claimed hostnames:
-// a node only gets the claims of nodes it can see, and a policy change can
-// change what it sees. The connection drops a DNSConfig equal to the one its
-// client holds, see [connectionEntry.withDNSConfigDelta].
+// a node only gets the claims of nodes it can see, and a policy, tag or
+// expiry change can change what it sees or which claims exist. Once claims
+// are in use the DNS config is therefore always included, see
+// [state.State.HostnameClaimsInUse]: a flag on the change could be lost when
+// same-tick policy changes are deduplicated. The connection drops a
+// DNSConfig equal to the one its client holds, see
+// [connectionEntry.withDNSConfigDelta].
 //
 // This avoids the issue where an empty Peers slice is interpreted by Tailscale
 // clients as "no change" rather than "no peers".
@@ -334,7 +345,7 @@ func (m *mapper) policyChangeResponse(
 		WithSSHPolicy().
 		WithSelfNode()
 
-	if m.state.HasHostnameClaims() {
+	if m.state.HostnameClaimsInUse() {
 		builder.WithDNSConfig()
 	}
 

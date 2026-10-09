@@ -134,6 +134,19 @@ func serviceHostnames(rules []hostnameClaimRule, nodeTags []string, services []s
 	return slices.Compact(names)
 }
 
+// HasHostnameClaims reports whether the policy has any hostnameClaims rule,
+// that is whether a node's advertised services can matter at all.
+func (pm *PolicyManager) HasHostnameClaims() bool {
+	if pm == nil {
+		return false
+	}
+
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	return pm.pol != nil && len(pm.pol.hostnameClaimRules) > 0
+}
+
 // ServiceHostnames returns the hostnames node may answer for, given the
 // service names it advertises and the policy's hostnameClaims. Only tagged
 // nodes can claim hostnames: a claim is an infrastructure role, and tags are

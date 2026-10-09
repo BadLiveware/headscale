@@ -68,6 +68,10 @@ type PolicyManager interface {
 	// hostnameClaims section.
 	ServiceHostnames(node types.NodeView, services []string) []string
 
+	// HasHostnameClaims reports whether the policy has any hostnameClaims
+	// rule.
+	HasHostnameClaims() bool
+
 	// ViaRoutesForPeer computes via grant effects for a viewer-peer pair.
 	// It returns which routes should be included (peer is via-designated for viewer)
 	// and excluded (steered to a different peer). When no via grants apply,

@@ -35,6 +35,16 @@ type hostnameClaims struct {
 	// snapshot cannot overwrite the result of a newer one.
 	mu      sync.Mutex
 	records atomic.Pointer[[]claimRecord]
+
+	// inUse is set once any record has been published and stays set. A
+	// node can then hold claim records, so every response that can change
+	// what it may see carries the DNS config, see
+	// [State.HostnameClaimsInUse].
+	inUse atomic.Bool
+
+	// warned holds the names already reported as shadowing the MagicDNS
+	// base domain, so each is logged once. Guarded by mu.
+	warned map[string]struct{}
 }
 
 // hostnamesFunc returns the hostnames a node may claim with the given
@@ -43,14 +53,18 @@ type hostnamesFunc func(node types.NodeView, services []string) []string
 
 // deriveClaimRecords returns an A or AAAA record for each address of each
 // online node, for each hostname it advertises and the policy lets it claim.
-// The result is sorted. A name directly below baseDomain is dropped: that
-// zone holds the MagicDNS names of nodes, and a claim must not shadow one.
+// The records are sorted. A name directly below baseDomain is dropped and
+// returned in shadowed: that zone holds the MagicDNS names of nodes, and a
+// claim must not shadow one.
 func deriveClaimRecords(
 	nodes views.Slice[types.NodeView],
 	hostnames hostnamesFunc,
 	baseDomain string,
-) []claimRecord {
-	var records []claimRecord
+) ([]claimRecord, []string) {
+	var (
+		records  []claimRecord
+		shadowed []string
+	)
 
 	for _, node := range nodes.All() {
 		if !node.Online() || node.AdvertisedServices().Len() == 0 {
@@ -60,11 +74,7 @@ func deriveClaimRecords(
 		for _, name := range hostnames(node, node.AdvertisedServices().AsSlice()) {
 			_, zone, _ := strings.Cut(name, ".")
 			if baseDomain != "" && strings.EqualFold(zone, baseDomain) {
-				log.Debug().
-					Str("hostname", name).
-					EmbedObject(node).
-					Msg("ignoring hostname claim in the MagicDNS base domain")
-
+				shadowed = append(shadowed, name)
 				continue
 			}
 
@@ -95,7 +105,7 @@ func deriveClaimRecords(
 		)
 	})
 
-	return records
+	return records, shadowed
 }
 
 // refreshHostnameClaims derives the claimed-hostname records from the
@@ -109,7 +119,28 @@ func (s *State) refreshHostnameClaims() change.Change {
 	s.claims.mu.Lock()
 	defer s.claims.mu.Unlock()
 
-	next := deriveClaimRecords(s.nodeStore.ListNodes(), s.polMan.ServiceHostnames, s.cfg.BaseDomain)
+	next, shadowed := deriveClaimRecords(s.nodeStore.ListNodes(), s.polMan.ServiceHostnames, s.cfg.BaseDomain)
+
+	for _, name := range shadowed {
+		if _, done := s.claims.warned[name]; done {
+			continue
+		}
+
+		if s.claims.warned == nil {
+			s.claims.warned = make(map[string]struct{})
+		}
+
+		s.claims.warned[name] = struct{}{}
+
+		log.Warn().
+			Str("hostname", name).
+			Str("base_domain", s.cfg.BaseDomain).
+			Msg("ignoring claimed hostname directly below the MagicDNS base domain; use a zone outside it or a subzone")
+	}
+
+	if len(next) > 0 {
+		s.claims.inUse.Store(true)
+	}
 
 	var prev []claimRecord
 	if p := s.claims.records.Load(); p != nil {
@@ -138,12 +169,13 @@ func (s *State) withHostnameClaims(cs []change.Change) []change.Change {
 	return append(cs, c)
 }
 
-// HasHostnameClaims reports whether any node currently publishes a claimed
-// hostname.
-func (s *State) HasHostnameClaims() bool {
-	records := s.claims.records.Load()
-
-	return records != nil && len(*records) > 0
+// HostnameClaimsInUse reports whether claim records have been published
+// since Headscale started. It stays true after the last claim is gone: a
+// client may still hold records, and a policy, tag or expiry change that
+// removes them must still send the DNS config. Sending it is cheap, because
+// a connection drops a DNS config equal to the one its client holds.
+func (s *State) HostnameClaimsInUse() bool {
+	return s.claims.inUse.Load()
 }
 
 // HostnameClaimRecords returns the claimed-hostname records that viewer may
@@ -233,4 +265,29 @@ func (s *State) SetNodeAdvertisedServices(
 	}
 
 	return s.refreshHostnameClaims(), nil
+}
+
+// HostnameClaimsConfigured reports whether the policy has any hostnameClaims
+// rule. Without one, the services a node advertises cannot matter.
+func (s *State) HostnameClaimsConfigured() bool {
+	return s.polMan.HasHostnameClaims()
+}
+
+// OnPolicyReload registers fn to run after every policy reload, once the
+// new policy is in effect.
+func (s *State) OnPolicyReload(fn func()) {
+	s.policyReloadedMu.Lock()
+	defer s.policyReloadedMu.Unlock()
+
+	s.policyReloaded = append(s.policyReloaded, fn)
+}
+
+func (s *State) runPolicyReloaded() {
+	s.policyReloadedMu.Lock()
+	fns := slices.Clone(s.policyReloaded)
+	s.policyReloadedMu.Unlock()
+
+	for _, fn := range fns {
+		fn()
+	}
 }
