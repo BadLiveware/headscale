@@ -59,5 +59,15 @@ A client on a bad network is marked offline only when it cannot answer for more 
 not reconnect within 10 seconds.
 Lower values find lost nodes sooner, but mark nodes on slow or unstable networks offline more often, and make idle
 devices, such as phones, wake their radio more often.
-Set `noise.ping_after_idle: 0` to disable the check.
 
+The cost of the defaults: an idle node exchanges one small PING and answer about every 30 seconds.
+Headscale already sends each node a map keepalive every 50 to 59 seconds, so for an idle phone the check about doubles
+the radio wake-ups caused by Headscale.
+With `noise.ping_after_idle: 60s` the cost halves, and lost nodes are offline about 70 to 90 seconds after the loss.
+
+The `noise.ping_timeout` window includes the time the PING waits behind map data already queued for the node.
+A very large network map sent over a very slow link can therefore exceed it; the node then reconnects.
+
+Headscale logs a closed connection with the message `timeout waiting for PING response` and counts it in the
+`headscale_noise_http2_errors_total{type="conn_close_lost_ping"}` metric.
+Set `noise.ping_after_idle: 0` to disable the check.

@@ -54,8 +54,17 @@ noise:
   # With the defaults, such a node is offline 30 to 60 seconds after the loss.
   # A node is only marked offline when it is unreachable for more than
   # ping_timeout and does not reconnect within 10 seconds, so short gaps on
-  # mobile networks do not mark it offline. An idle node exchanges one small
-  # PING and answer about every ping_after_idle.
+  # mobile networks do not mark it offline.
+  #
+  # Cost: an idle node exchanges one small PING and answer about every
+  # ping_after_idle. With 30s that is about twice the radio wake-ups of the
+  # map keepalive headscale already sends every 50-59s, which matters for
+  # phones. ping_after_idle: 60s halves that and finds lost nodes in about
+  # 70 to 90 seconds instead.
+  #
+  # The ping_timeout window includes the time the PING waits behind map data
+  # already queued for the node, so a very large network map on a very slow
+  # link can exceed it and the node reconnects.
   #
   # Set ping_after_idle to 0 to disable the check.
   # ping_after_idle must be >= 5s when enabled; ping_timeout must be >= 1s.
