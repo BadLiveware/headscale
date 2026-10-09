@@ -96,9 +96,14 @@ func TestNoisePingDisabledKeepsCutNodeOnline(t *testing.T) {
 func TestNoisePingKeepsIdleClientOnline(t *testing.T) {
 	t.Parallel()
 
-	const idle = 1 * time.Second
+	// A short idle time gives many PING rounds; a generous answer window
+	// keeps a loaded -race run from closing a healthy connection.
+	const (
+		idle    = 1 * time.Second
+		timeout = 5 * time.Second
+	)
 
-	srv := servertest.NewServer(t, servertest.WithNoisePing(idle, idle))
+	srv := servertest.NewServer(t, servertest.WithNoisePing(idle, timeout))
 	user := srv.CreateUser(t, "idle-user")
 
 	a := servertest.NewClient(t, srv, "idle-a", servertest.WithUser(user))
