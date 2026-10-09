@@ -38,8 +38,15 @@ Only tagged nodes host services.
   stores them in the database.
   A service keeps its VIPs across restarts, and when the policy removes and adds it again.
   Headscale never gives a VIP to a node or to another service.
+- Headscale never deletes a service's VIPs, and there is no command to delete them yet.
+- A service gets an IPv6 VIP only if `prefixes.v6` is set when Headscale first allocates its VIPs.
+  Adding `prefixes.v6` later gives no IPv6 VIP to existing services.
+- If the address pool has no room, the service gets no VIPs: nobody can reach it, Headscale logs an error and counts it
+  in the `headscale_service_vip_allocation_failures_total` metric, and tries again on the next policy change or
+  restart.
 - `svc:<label>` is a destination for grants and ACLs (`"svc:grafana:443"` in an ACL).
   It cannot be a source, an SSH destination or a `nodeAttrs` target.
+- A wildcard destination (`"*"`, as in an allow-all policy) contains every VIP: it lets its sources reach every service.
 - A grant to the tag of the hosts lets clients reach the hosts' own addresses, not the service.
 - Give each service its own tag, and register its hosts with a pre-auth key for that tag, so that a node of one service
   cannot host another.
@@ -120,3 +127,11 @@ services:
 
 With the defaults, a host loses at most one client to the rebalance every 5 seconds.
 For example, with 1200 clients on 3 hosts, a fourth host gets its share of about 300 clients in about 7 to 8 minutes.
+
+## Downgrade
+
+Tailscale Services add the `services` table to the database.
+A Headscale version without Tailscale Services rejects a policy that uses `autoApprovers.services` or `svc:`, and with
+SQLite it refuses to start while the `services` table exists, because it checks the database schema.
+Remove the services from the policy and drop the table before a downgrade.
+
