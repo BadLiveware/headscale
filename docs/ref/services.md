@@ -126,7 +126,9 @@ services:
 ```
 
 With the defaults, a host loses at most one client to the rebalance every 5 seconds.
-For example, with 1200 clients on 3 hosts, a fourth host gets its share of about 300 clients in about 7 to 8 minutes.
+For example, with 1200 clients on 3 hosts, a fourth host has a preferred share of about 300 clients.
+The rebalance moves about 267 of them in about 7 to 8 minutes, and then stops: every host is within the 10 % tolerance of
+its share, so the last clients keep their host instead of having their connections reset.
 
 ## Downgrade
 

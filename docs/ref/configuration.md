@@ -45,7 +45,11 @@
 Every online node keeps one control connection open to Headscale.
 When the network path of a node is lost without a clean close, for example when its host crashes, its cable is pulled or
 it falls asleep, Headscale would only notice when TCP gives up, which takes about 15 minutes on Linux.
-Until then the node stays online for its peers, and its subnet routes, exit node and other online-only roles stay with it.
+Until then the node stays online: peers and `headscale nodes list` show it as online, and what waits for a node to go
+offline waits too, such as the cleanup of an ephemeral node after `node.ephemeral.inactivity_timeout`.
+HA subnet routers are the exception: when HA routes exist, Headscale probes those routers every
+`node.routes.ha.probe_interval` and moves the routes away from one that does not answer, without waiting for it to go
+offline.
 
 Headscale therefore checks the connection with HTTP/2 PING frames:
 
@@ -71,3 +75,5 @@ A very large network map sent over a very slow link can therefore exceed it; the
 Headscale logs a closed connection with the message `timeout waiting for PING response` and counts it in the
 `headscale_noise_http2_errors_total{type="conn_close_lost_ping"}` metric.
 Set `noise.ping_after_idle: 0` to disable the check.
+Headscale versions without the check ignore the `noise.ping_after_idle` and `noise.ping_timeout` keys, so a configuration
+that sets them still loads after a downgrade.
