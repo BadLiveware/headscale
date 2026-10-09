@@ -286,10 +286,11 @@ func (s *State) SetNodeAdvertisedServices(
 	return s.refreshHostnameClaims(), nil
 }
 
-// HostnameClaimsConfigured reports whether the policy has any hostnameClaims
-// rule. Without one, the services a node advertises cannot matter.
-func (s *State) HostnameClaimsConfigured() bool {
-	return s.polMan.HasHostnameClaims()
+// AdvertisedServicesMatter reports whether the policy has any
+// hostnameClaims rule or defines any service in autoApprovers.services.
+// Without either, the services a node advertises cannot matter.
+func (s *State) AdvertisedServicesMatter() bool {
+	return s.polMan.HasHostnameClaims() || len(s.polMan.ServiceNames()) > 0
 }
 
 // OnPolicyReload registers fn to run after every policy reload, once the
