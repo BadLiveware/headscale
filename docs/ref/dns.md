@@ -152,9 +152,13 @@ client instead.
 
 - Only tagged nodes can claim hostnames, and only the hostnames their tags allow.
 - A node that goes offline loses its claims until it is online again.
-- A node gets only the records of nodes it can reach under the policy.
-- A claimed hostname directly below `dns.base_domain` is ignored, so a claim cannot shadow the MagicDNS name of a node.
-- A claimed hostname and an extra DNS record with the same name are both answered.
+- A node gets only its own records and the records of its peers. Two nodes are peers when the policy lets either of them
+  reach the other, the same relation that decides which nodes appear in a node's network map.
+- A claimed hostname directly below `dns.base_domain` is ignored, and Headscale logs a warning, so a claim cannot shadow
+  the MagicDNS name of a node. A deeper zone, such as `*.svc.<base_domain>`, is allowed.
+- When an extra DNS record and claims have the same name, the client holds all of them, extra records first. It answers
+  with the first address of each family, so the extra record's address wins for its family, and claims only answer for a
+  family the extra records do not cover.
 - A client reports its advertised services to Headscale from Tailscale v1.78 on; older clients cannot claim hostnames, but
   they resolve them.
 
