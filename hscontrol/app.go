@@ -187,6 +187,7 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 	app.ephemeralGC = ephemeralGC
 	app.servicesFetcher = newServicesFetcher(&app)
 	app.state.OnPolicyReload(func() { go app.servicesFetcher.syncAll() })
+	app.state.OnServiceHostsMoved(func() { app.Change() })
 
 	var authProvider AuthProvider
 

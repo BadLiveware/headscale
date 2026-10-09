@@ -48,6 +48,9 @@ type services struct {
 
 	pendingMu sync.Mutex
 	pending   []change.Change
+
+	movedMu sync.Mutex
+	moved   []func()
 }
 
 // loadServiceVIPs reads the stored VIPs, allocates VIPs for the services
@@ -184,9 +187,25 @@ func chooseServiceHost(viewer types.NodeID, hosts, peers []types.NodeID) (types.
 // viewers get nothing. [State.DrainSelfRefreshes] hands the queue to the
 // batcher.
 func (s *State) refreshServiceHosts() {
+	if !s.refreshServiceHostsLocked() {
+		return
+	}
+
+	s.services.movedMu.Lock()
+	fns := slices.Clone(s.services.moved)
+	s.services.movedMu.Unlock()
+
+	for _, fn := range fns {
+		fn()
+	}
+}
+
+// refreshServiceHostsLocked does the work of [State.refreshServiceHosts]
+// under the services lock and reports whether it queued changes.
+func (s *State) refreshServiceHostsLocked() bool {
 	vips := s.services.vips.Load()
 	if vips == nil {
-		return
+		return false
 	}
 
 	s.services.mu.Lock()
@@ -211,7 +230,7 @@ func (s *State) refreshServiceHosts() {
 	}
 
 	if len(changed) == 0 {
-		return
+		return false
 	}
 
 	slices.Sort(changed)
@@ -263,9 +282,26 @@ func (s *State) refreshServiceHosts() {
 		Int("viewers.moved", len(queued)).
 		Msg("service hosts changed")
 
+	if len(queued) == 0 {
+		return false
+	}
+
 	s.services.pendingMu.Lock()
 	s.services.pending = append(s.services.pending, queued...)
 	s.services.pendingMu.Unlock()
+
+	return true
+}
+
+// OnServiceHostsMoved registers fn to run after a host change queued
+// changes for clients. The queue reaches the batcher only through
+// [State.DrainSelfRefreshes], and the caller of the event may send nothing
+// itself (for example when no DNS record changed), so fn must dispatch.
+func (s *State) OnServiceHostsMoved(fn func()) {
+	s.services.movedMu.Lock()
+	defer s.services.movedMu.Unlock()
+
+	s.services.moved = append(s.services.moved, fn)
 }
 
 // drainServiceMoves returns and clears the queued service-host changes.
