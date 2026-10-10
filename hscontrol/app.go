@@ -103,6 +103,10 @@ type Headscale struct {
 	authProvider   AuthProvider
 	mapBatcher     *mapper.Batcher
 
+	// servicesFetcher fetches the services nodes advertise, which back
+	// node-claimed hostnames.
+	servicesFetcher *servicesFetcher
+
 	clientStreamsOpen sync.WaitGroup
 }
 
@@ -181,6 +185,9 @@ func NewHeadscale(cfg *types.Config) (*Headscale, error) {
 		log.Debug().Caller().EmbedObject(node).Msg("ephemeral node deleted because garbage collection timeout reached")
 	})
 	app.ephemeralGC = ephemeralGC
+	app.servicesFetcher = newServicesFetcher(&app)
+	app.state.OnPolicyReload(func() { go app.servicesFetcher.syncAll() })
+	app.state.OnServiceHostsMoved(func() { app.Change() })
 
 	var authProvider AuthProvider
 
@@ -340,6 +347,17 @@ func (h *Headscale) scheduledTasks(ctx context.Context) {
 		revokedKeyGCChan = revokedKeyTicker.C
 	}
 
+	// Clients of a service keep their host; a joining host gets clients
+	// through this bounded rebalance.
+	var serviceRebalanceChan <-chan time.Time
+
+	if h.cfg.Services.Rebalance.Interval > 0 {
+		rebalanceTicker := time.NewTicker(h.cfg.Services.Rebalance.Interval)
+		defer rebalanceTicker.Stop()
+
+		serviceRebalanceChan = rebalanceTicker.C
+	}
+
 	// OAuth access tokens are short-lived (1h) and re-minted on demand; reap
 	// expired rows hourly so the table stays bounded.
 	accessTokenTicker := time.NewTicker(time.Hour)
@@ -360,6 +378,9 @@ func (h *Headscale) scheduledTasks(ctx context.Context) {
 			} else if reaped > 0 {
 				log.Info().Int("count", reaped).Msg("reaped revoked pre-auth keys")
 			}
+
+		case <-serviceRebalanceChan:
+			h.state.RebalanceServices()
 
 		case <-accessTokenTicker.C:
 			reaped, err := h.state.DeleteExpiredAccessTokens(time.Now())
@@ -891,6 +912,7 @@ func (h *Headscale) Serve() error {
 
 				scheduleCancel()
 				h.ephemeralGC.Close()
+				h.servicesFetcher.stop()
 
 				// Gracefully shut down servers
 				shutdownCtx, cancel := context.WithTimeout(

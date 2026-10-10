@@ -109,6 +109,16 @@ CREATE TABLE policies(
 );
 CREATE INDEX idx_policies_deleted_at ON policies(deleted_at);
 
+CREATE TABLE services(
+  id integer PRIMARY KEY AUTOINCREMENT,
+  name text NOT NULL,
+  ipv4 text,
+  ipv6 text,
+
+  created_at datetime
+);
+CREATE UNIQUE INDEX idx_services_name ON services(name);
+
 CREATE TABLE database_versions(
   id integer PRIMARY KEY,
   version text NOT NULL,

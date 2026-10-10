@@ -167,6 +167,18 @@ type State struct {
 	// pings tracks pending ping requests and their response channels.
 	pings *pingTracker
 
+	// claims caches the DNS records of node-claimed hostnames.
+	claims hostnameClaims
+
+	// services holds the virtual IP addresses of Tailscale Services and
+	// their active hosts.
+	services services
+
+	// policyReloaded holds the callbacks [State.ReloadPolicy] runs after it
+	// swapped the policy, see [State.OnPolicyReload].
+	policyReloaded   []func()
+	policyReloadedMu sync.Mutex
+
 	// sshCheckAuth tracks when source nodes last completed SSH check auth.
 	//
 	// For rules without explicit checkPeriod (default 12h), auth covers any
@@ -290,6 +302,22 @@ func NewState(cfg *types.Config) (*State, error) {
 		registerLocks: xsync.NewMap[key.MachinePublic, *sync.Mutex](),
 	}
 
+	s.services.startedAt = time.Now()
+
+	_, err = s.loadServiceVIPs()
+	if err != nil {
+		// Stop the NodeStore and close the database opened above.
+		_ = s.Close()
+
+		return nil, fmt.Errorf("loading service addresses: %w", err)
+	}
+
+	// The first peer maps were built before the service addresses were
+	// known; hosts are peers of the nodes that may reach their services.
+	if s.HasServiceVIPs() {
+		s.nodeStore.RebuildPeerMaps()
+	}
+
 	// Surface nodes whose stored data would break map generation (e.g. an
 	// invalid given name from a legacy row) so an operator can fix them. This
 	// only logs; it never mutates a node's stored name at boot.
@@ -360,9 +388,18 @@ func (s *State) ReloadPolicy() ([]change.Change, error) {
 		return nil, fmt.Errorf("setting policy: %w", err)
 	}
 
+	servicesChanged, err := s.loadServiceVIPs()
+	if err != nil {
+		log.Error().Err(err).Msg("loading service addresses during policy reload")
+	}
+
+	policyChanged = policyChanged || servicesChanged
+
 	// Clear SSH check auth times when policy changes to ensure stale
 	// approvals don't persist if checkPeriod rules are modified or removed.
 	s.ClearSSHCheckAuth()
+
+	defer s.runPolicyReloaded()
 
 	// Rebuild peer maps after policy changes because the peersFunc in [NodeStore]
 	// uses the [policy.PolicyManager]'s filters. Without this, nodes won't see
@@ -373,7 +410,7 @@ func (s *State) ReloadPolicy() ([]change.Change, error) {
 	// Nodes whose CapMap shifted get their self refresh from
 	// [State.DrainSelfRefreshes] when these changes are dispatched.
 	//nolint:prealloc // cs starts with one element and may grow
-	cs := []change.Change{change.PolicyChange()}
+	cs := s.withHostnameClaims([]change.Change{change.PolicyChange()})
 
 	// Always call autoApproveNodes during policy reload, regardless of whether
 	// the policy content has changed. This ensures that routes are re-evaluated
@@ -637,10 +674,10 @@ func (s *State) DeleteNode(node types.NodeView) ([]change.Change, error) {
 
 	policyChange, err := s.updatePolicyManagerNodes(genBefore)
 	if err != nil {
-		return []change.Change{removed, policyChange}, fmt.Errorf("updating policy manager after node deletion: %w", err)
+		return s.withHostnameClaims([]change.Change{removed, policyChange}), fmt.Errorf("updating policy manager after node deletion: %w", err)
 	}
 
-	return []change.Change{removed, policyChange}, nil
+	return s.withHostnameClaims([]change.Change{removed, policyChange}), nil
 }
 
 // Connect acquires a control session and returns the resulting changes
@@ -689,7 +726,7 @@ func (s *State) Connect(id types.NodeID) ([]change.Change, uint64) {
 		c = append(c, change.PolicyChange())
 	}
 
-	return c, epoch
+	return s.withHostnameClaims(c), epoch
 }
 
 // Disconnect releases one poll session previously acquired by
@@ -758,7 +795,7 @@ func (s *State) Disconnect(id types.NodeID, epoch uint64) ([]change.Change, erro
 		cs = append(cs, change.PolicyChange())
 	}
 
-	return cs, nil
+	return s.withHostnameClaims(cs), nil
 }
 
 // GetNodeByID retrieves a node by ID.
@@ -947,6 +984,10 @@ func (s *State) SetNodeExpiry(nodeID types.NodeID, expiry *time.Time) (types.Nod
 		recompute = change.PolicyChange()
 	}
 
+	// The NodeStore holds the new online state, so the claims follow it
+	// on every return below, the failed database writes included.
+	recompute = recompute.Merge(s.refreshHostnameClaims())
+
 	// Persist expiry change to database directly since persistNodeAndRefreshPolicy omits expiry.
 	err := s.db.NodeSetExpiry(nodeID, expiry)
 	if err != nil {
@@ -1024,7 +1065,8 @@ func (s *State) SetNodeTags(nodeID types.NodeID, tags []string) (types.NodeView,
 
 	nodeView, c, err := s.persistNodeAndRefreshPolicy(n, genBefore)
 	if err != nil {
-		return nodeView, c, err
+		// The NodeStore already holds the new tags; claims follow them.
+		return nodeView, c.Merge(s.refreshHostnameClaims()), err
 	}
 
 	if c.IsEmpty() {
@@ -1039,7 +1081,7 @@ func (s *State) SetNodeTags(nodeID types.NodeID, tags []string) (types.NodeView,
 	// Setting OriginNode ensures the node gets a self-update with the new tags.
 	c.OriginNode = nodeID
 
-	return nodeView, c, nil
+	return nodeView, c.Merge(s.refreshHostnameClaims()), nil
 }
 
 // SetApprovedRoutes sets the network routes that a node is approved to advertise.
@@ -1124,7 +1166,8 @@ func (s *State) RenameNode(nodeID types.NodeID, newName string) (types.NodeView,
 
 	nodeView, c, err := s.persistNodeAndRefreshPolicy(view, genBefore)
 	if err != nil {
-		return nodeView, c, err
+		// The NodeStore already has the new name.
+		return nodeView, c.Merge(s.refreshHostnameClaims()), err
 	}
 
 	if c.IsEmpty() {
@@ -1132,7 +1175,8 @@ func (s *State) RenameNode(nodeID types.NodeID, newName string) (types.NodeView,
 		c = change.NodeAdded(nodeID)
 	}
 
-	return nodeView, c, nil
+	// A node name can hide or free the MagicDNS name of a service.
+	return nodeView, c.Merge(s.refreshHostnameClaims()), nil
 }
 
 // BackfillNodeIPs assigns IP addresses to nodes that don't have them. The
@@ -1249,7 +1293,7 @@ func (s *State) ExpireExpiredNodes(lastCheck time.Time) (time.Time, []change.Cha
 	}
 
 	if len(updates) > 0 {
-		return started, updates, true
+		return started, s.withHostnameClaims(updates), true
 	}
 
 	return started, nil, false
@@ -1308,6 +1352,10 @@ func (s *State) SetPolicy(pol []byte) (bool, error) {
 	if err != nil {
 		return changed, err
 	}
+
+	// No VIPs are allocated here: the API calls SetPolicy to check a
+	// policy before it stores it, and a rejected policy must not use up
+	// addresses. ReloadPolicy allocates once the policy is stored.
 
 	// Clear SSH check auth times when policy changes.
 	s.ClearSSHCheckAuth()
@@ -1424,6 +1472,8 @@ func (s *State) RoutesForPeer(
 			}
 		}
 	}
+
+	reduced = append(reduced, s.serviceRoutesForPeer(viewer, peer, matchers)...)
 
 	// Co-router visibility: when the viewer advertises the same prefix
 	// that the peer is HA primary for, the viewer must see that route
@@ -3114,6 +3164,15 @@ func (s *State) updatePolicyManagerUsers() (change.Change, error) {
 		// so peer visibility reflects the new policy. Without this, the
 		// cached peersByNode stays stale until the next node write.
 		s.nodeStore.RebuildPeerMaps()
+
+		// Claimed names and service hosts depend on who sees whom.
+		claims := s.refreshHostnameClaims()
+
+		if changed {
+			return change.PolicyChange().Merge(claims), nil
+		}
+
+		return claims, nil
 	}
 
 	if changed {
@@ -3146,12 +3205,16 @@ func (s *State) DrainSelfRefreshes() []change.Change {
 	slices.Sort(ids)
 	ids = slices.Compact(ids)
 
-	cs := make([]change.Change, 0, len(ids))
+	s.reconcileServiceHosts()
+
+	moves := s.drainServiceMoves()
+
+	cs := make([]change.Change, 0, len(ids)+len(moves))
 	for _, id := range ids {
 		cs = append(cs, change.SelfUpdate(id))
 	}
 
-	return cs
+	return append(cs, moves...)
 }
 
 // updatePolicyManagerNodes refreshes the policy manager with current node
@@ -3176,6 +3239,8 @@ func (s *State) updatePolicyManagerNodes(genBefore uint64) (change.Change, error
 		// a change here means this snapshot raced another writer and moved
 		// the policy manager away from what adjacency was built with.
 		s.nodeStore.RebuildPeerMaps()
+
+		return s.policyChangeSince(genBefore).Merge(s.refreshHostnameClaims()), nil
 	}
 
 	return s.policyChangeSince(genBefore), nil

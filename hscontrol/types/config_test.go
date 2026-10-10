@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -938,5 +939,47 @@ func TestExtraRecordsAreLowercased(t *testing.T) {
 
 	if diff := cmp.Diff(want, cfg.TailcfgDNSConfig.ExtraRecords); diff != "" {
 		t.Errorf("SetExtraRecords mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestValidateServicesConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		set     map[string]any
+		wantErr string
+	}{
+		{name: "defaults"},
+		{name: "rebalance-off", set: map[string]any{"services.rebalance.interval": "0s"}},
+		{name: "nan-tolerance", set: map[string]any{"services.rebalance.tolerance": math.NaN()}, wantErr: "tolerance"},
+		{name: "negative-tolerance", set: map[string]any{"services.rebalance.tolerance": -0.1}, wantErr: "tolerance"},
+		{name: "whole-tolerance", set: map[string]any{"services.rebalance.tolerance": 1.0}, wantErr: "tolerance"},
+		{name: "no-moves", set: map[string]any{"services.rebalance.moves_per_host_per_minute": 0}, wantErr: "moves_per_host_per_minute"},
+		{name: "negative-grace", set: map[string]any{"services.startup_grace": "-1s"}, wantErr: "startup_grace"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			viper.Reset()
+
+			viper.SetDefault("services.startup_grace", "60s")
+			viper.SetDefault("services.rebalance.interval", "10s")
+			viper.SetDefault("services.rebalance.moves_per_host_per_minute", defaultServiceMovesPerHostPerMinute)
+			viper.SetDefault("services.rebalance.tolerance", defaultServiceRebalanceTolerance)
+
+			for k, v := range tt.set {
+				viper.Set(k, v)
+			}
+
+			v := &configValidator{}
+			validateServicesConfig(v)
+
+			if tt.wantErr == "" {
+				require.NoError(t, v.Err())
+
+				return
+			}
+
+			require.ErrorContains(t, v.Err(), tt.wantErr)
+		})
 	}
 }

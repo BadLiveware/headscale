@@ -60,6 +60,10 @@ type connectionEntry struct {
 
 	// lastSSHPolicy is the last non-nil policy delivered to this connection.
 	lastSSHPolicy atomic.Pointer[tailcfg.SSHPolicy]
+
+	// lastDNSConfig is the last non-nil DNS config delivered to this
+	// connection.
+	lastDNSConfig atomic.Pointer[tailcfg.DNSConfig]
 }
 
 // withSelfDelta returns data without its Node when this client already
@@ -86,6 +90,21 @@ func (entry *connectionEntry) withSSHPolicyDelta(data *tailcfg.MapResponse) *tai
 
 	stripped := *data
 	stripped.SSHPolicy = nil
+
+	return &stripped
+}
+
+// withDNSConfigDelta returns data without its DNSConfig when this client
+// already holds an equal one: any non-nil DNSConfig forces a full client
+// netmap rebuild, and a hostname-claim change reaches every client while
+// most of them see no difference.
+func (entry *connectionEntry) withDNSConfigDelta(data *tailcfg.MapResponse) *tailcfg.MapResponse {
+	if data.DNSConfig == nil || !reflect.DeepEqual(entry.lastDNSConfig.Load(), data.DNSConfig) {
+		return data
+	}
+
+	stripped := *data
+	stripped.DNSConfig = nil
 
 	return &stripped
 }
@@ -379,7 +398,7 @@ func (mc *multiChannelNodeConn) send(data *tailcfg.MapResponse) error {
 	)
 
 	for _, conn := range snapshot {
-		err := conn.send(conn.withSSHPolicyDelta(conn.withSelfDelta(data)))
+		err := conn.send(conn.withDNSConfigDelta(conn.withSSHPolicyDelta(conn.withSelfDelta(data))))
 		if err != nil {
 			lastErr = err
 
@@ -397,6 +416,10 @@ func (mc *multiChannelNodeConn) send(data *tailcfg.MapResponse) error {
 
 			if data.SSHPolicy != nil {
 				conn.lastSSHPolicy.Store(data.SSHPolicy)
+			}
+
+			if data.DNSConfig != nil {
+				conn.lastDNSConfig.Store(data.DNSConfig)
 			}
 		}
 	}

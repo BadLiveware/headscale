@@ -296,6 +296,8 @@ jobs:
           - TestDERPVerifyEndpoint
           - TestResolveMagicDNS
           - TestResolveMagicDNSExtraRecordsPath
+          - TestNodeClaimedHostnames
+          - TestServiceVIPs
           - TestDERPServerScenario
           - TestDERPServerWebsocketScenario
           - TestPingAllByIP

@@ -76,6 +76,37 @@ type HARouteConfig struct {
 	ProbeTimeout time.Duration
 }
 
+// ServicesConfig controls how Headscale assigns the clients of a Tailscale
+// Service to its hosts. A client keeps its host while that host is active,
+// because moving a client resets its open connections to the service; a
+// host that joins gets clients by a bounded, gradual rebalance.
+type ServicesConfig struct {
+	// StartupGrace is how long after Headscale starts every client follows
+	// its rendezvous choice of host at once. Assignments live in memory, so
+	// without it the first host to reconnect after a restart would keep
+	// every client.
+	StartupGrace time.Duration
+
+	Rebalance ServicesRebalanceConfig
+}
+
+// ServicesRebalanceConfig bounds how fast clients move to the host that
+// rendezvous hashing prefers, after a host joined.
+type ServicesRebalanceConfig struct {
+	// Interval is how often the rebalance runs. Zero disables it: clients
+	// then only move when their host leaves.
+	Interval time.Duration
+
+	// MovesPerHostPerMinute caps how many clients a rebalance takes away
+	// from one host per minute; each move resets that client's open
+	// connections to the service.
+	MovesPerHostPerMinute int
+
+	// Tolerance is the fraction by which a host's client count may differ
+	// from its rendezvous share before the rebalance moves clients.
+	Tolerance float64
+}
+
 // RouteConfig contains configuration for route behaviour.
 type RouteConfig struct {
 	HA HARouteConfig
@@ -113,6 +144,7 @@ type Config struct {
 	TrustedProxies      []netip.Prefix
 	Node                NodeConfig
 	PreAuthKeys         PreAuthKeysConfig
+	Services            ServicesConfig
 	PrefixV4            *netip.Prefix
 	PrefixV6            *netip.Prefix
 	IPAllocation        IPAllocationStrategy
@@ -486,6 +518,10 @@ func LoadConfig(path string, isFile bool) error {
 	viper.SetDefault("preauth_keys.revoked_retention", "168h")
 	viper.SetDefault("node.routes.ha.probe_interval", "10s")
 	viper.SetDefault("node.routes.ha.probe_timeout", "5s")
+	viper.SetDefault("services.startup_grace", "60s")
+	viper.SetDefault("services.rebalance.interval", "10s")
+	viper.SetDefault("services.rebalance.moves_per_host_per_minute", defaultServiceMovesPerHostPerMinute)
+	viper.SetDefault("services.rebalance.tolerance", defaultServiceRebalanceTolerance)
 
 	viper.SetDefault("tuning.notifier_send_timeout", "800ms")
 	viper.SetDefault("tuning.batch_change_delay", "800ms")
@@ -711,6 +747,8 @@ func validateServerConfigInto(v *configValidator) {
 			})
 		}
 	}
+
+	validateServicesConfig(v)
 
 	// Validate HA health probing parameters
 	if haInterval := viper.GetDuration("node.routes.ha.probe_interval"); haInterval > 0 {
@@ -1414,6 +1452,14 @@ func LoadServerConfig() (*Config, error) {
 		PreAuthKeys: PreAuthKeysConfig{
 			RevokedRetention: viper.GetDuration("preauth_keys.revoked_retention"),
 		},
+		Services: ServicesConfig{
+			StartupGrace: viper.GetDuration("services.startup_grace"),
+			Rebalance: ServicesRebalanceConfig{
+				Interval:              viper.GetDuration("services.rebalance.interval"),
+				MovesPerHostPerMinute: viper.GetInt("services.rebalance.moves_per_host_per_minute"),
+				Tolerance:             viper.GetFloat64("services.rebalance.tolerance"),
+			},
+		},
 
 		Database: databaseConfig(),
 
@@ -1759,4 +1805,50 @@ func lowercaseRecordNames(records []tailcfg.DNSRecord) []tailcfg.DNSRecord {
 	}
 
 	return normalized
+}
+
+const (
+	// defaultServiceMovesPerHostPerMinute lets a rebalance reset the
+	// connections of at most one client per host every five seconds.
+	defaultServiceMovesPerHostPerMinute = 12
+
+	// defaultServiceRebalanceTolerance stops a rebalance when every host
+	// is within 10 % of its rendezvous share.
+	defaultServiceRebalanceTolerance = 0.1
+)
+
+func validateServicesConfig(v *configValidator) {
+	if grace := viper.GetDuration("services.startup_grace"); grace < 0 {
+		v.Add(&ConfigError{
+			Reason:  "services.startup_grace must not be negative",
+			Current: []KV{{"services.startup_grace", grace.String()}},
+			Hint:    "use 0 to make clients keep their host from the start",
+		})
+	}
+
+	interval := viper.GetDuration("services.rebalance.interval")
+	if interval < 0 {
+		v.Add(&ConfigError{
+			Reason:  "services.rebalance.interval must not be negative",
+			Current: []KV{{"services.rebalance.interval", interval.String()}},
+			Hint:    "use 0 to disable the rebalance",
+		})
+	}
+
+	if moves := viper.GetInt("services.rebalance.moves_per_host_per_minute"); interval > 0 && moves <= 0 {
+		v.Add(&ConfigError{
+			Reason:  "services.rebalance.moves_per_host_per_minute must be positive",
+			Current: []KV{{"services.rebalance.moves_per_host_per_minute", moves}},
+			Hint:    "set services.rebalance.interval to 0 to disable the rebalance instead",
+		})
+	}
+
+	// Written as the valid range so NaN fails it too.
+	if tol := viper.GetFloat64("services.rebalance.tolerance"); !(tol >= 0 && tol < 1) {
+		v.Add(&ConfigError{
+			Reason:  "services.rebalance.tolerance must be at least 0 and less than 1",
+			Current: []KV{{"services.rebalance.tolerance", tol}},
+			Hint:    "use a fraction such as 0.1",
+		})
+	}
 }

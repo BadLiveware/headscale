@@ -129,6 +129,8 @@ func (m *mapSession) serve() {
 		return
 	}
 
+	m.h.servicesFetcher.sync(m.node.ID)
+
 	// If OmitPeers is true and Stream is false
 	// then the server will let clients update their endpoints without
 	// breaking existing long-polling (Stream == true) connections.
@@ -295,6 +297,8 @@ func (m *mapSession) serveLongPoll() {
 
 	m.h.Change(mapReqChange)
 	m.h.Change(connectChanges...)
+
+	m.h.servicesFetcher.sync(m.node.ID)
 
 	// Loop through updates and continuously send them to the
 	// client.

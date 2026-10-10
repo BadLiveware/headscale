@@ -282,6 +282,13 @@ WHERE tags IS NOT NULL AND tags != '[]' AND tags != '' AND tags != 'null'
 				},
 				Rollback: func(db *gorm.DB) error { return nil },
 			},
+			{
+				// Store the virtual IP addresses of Tailscale Services, so a
+				// service keeps its addresses across restarts.
+				ID:       "202610091200-create-services",
+				Migrate:  ensureServicesTable,
+				Rollback: func(db *gorm.DB) error { return nil },
+			},
 		},
 	)
 
@@ -300,6 +307,11 @@ WHERE tags IS NOT NULL AND tags != '[]' AND tags != '' AND tags != 'null'
 		}
 
 		err = tx.AutoMigrate(&types.Node{}, &types.Policy{})
+		if err != nil {
+			return err
+		}
+
+		err = ensureServicesTable(tx)
 		if err != nil {
 			return err
 		}

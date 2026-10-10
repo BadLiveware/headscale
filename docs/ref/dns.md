@@ -109,3 +109,84 @@ hostname and port combination "http://hostname-in-magic-dns.myvpn.example.com:30
 
     }
     ```
+
+## Node-claimed hostnames
+
+A tagged node can claim a hostname, and Headscale publishes that hostname with the addresses of every online node that
+claims it.
+Use it to give one stable name to a service that runs on several nodes, for example the replicas of a load balancer.
+The Tailscale client answers a name with one IPv4 and one IPv6 address, so Headscale orders the addresses for each
+client with rendezvous hashing.
+The clients spread evenly over the nodes, and a client keeps resolving to the same node while the set of nodes it sees
+claiming the name does not change.
+When a node joins, only the clients that now prefer it move to it; when a node leaves, only its clients move.
+The records reach clients through the network map, and the Tailscale client answers them locally with
+[MagicDNS](https://tailscale.com/docs/features/magicdns), like [extra DNS records](#setting-extra-dns-records).
+Headscale does not need a restart when a claim changes.
+
+The `hostnameClaims` section of the [policy](policy.md) states which tags may claim which hostnames:
+
+```json title="policy.json"
+{
+  "tagOwners": {
+    "tag:services": ["alice@"],
+    "tag:grafana": ["alice@"]
+  },
+  "hostnameClaims": {
+    // A node tagged tag:services that advertises svc:<label> answers at <label>.svc.example.com.
+    "*.svc.example.com": ["tag:services"],
+    // Only the label "grafana" may be claimed here.
+    "grafana.example.com": ["tag:grafana"]
+  }
+}
+```
+
+A node claims a hostname when it advertises the service `svc:<label>`, where `<label>` is the first label of the
+hostname.
+A node withdraws its claim when it stops advertising the service:
+
+```console
+tailscale serve advertise svc:grafana  # a tag:grafana node claims grafana.example.com
+tailscale serve drain svc:grafana      # withdraws the claim
+```
+
+A [tsnet](https://tailscale.com/docs/features/tsnet) program sets the `AdvertiseServices` preference through its local
+client instead.
+
+- Only tagged nodes can claim hostnames, and only the hostnames their tags allow.
+- A node that goes offline loses its claims until it is online again.
+- A node gets only its own records and the records of its peers. Two nodes are peers when the policy lets either of them
+  reach the other, the same relation that decides which nodes appear in a node's network map.
+- A claimed hostname directly below `dns.base_domain` is ignored, and Headscale logs a warning, so a claim cannot shadow
+  the MagicDNS name of a node. A deeper zone, such as `*.svc.<base_domain>`, is allowed.
+- When an extra DNS record and claims have the same name, the client holds all of them, extra records first. It answers
+  with the first address of each family, so the extra record's address wins for its family, and claims only answer for a
+  family the extra records do not cover.
+- A client reports its advertised services to Headscale from Tailscale v1.78 on; older clients cannot claim hostnames, but
+  they resolve them.
+
+### Scope each name to its own tag
+
+Any node with an allowed tag can claim any name its pattern matches.
+With `"*.svc.example.com": ["tag:services"]`, every `tag:services` node can add itself to every name in the zone, so a
+misconfigured or compromised node can take traffic for a service it does not run.
+Headscale has no first-come ownership of a name: it publishes every node that claims it.
+
+Where this matters, give each service its own tag and an exact pattern:
+
+```json title="policy.json"
+{
+  "tagOwners": {
+    "tag:grafana": ["alice@"],
+    "tag:gitea": ["alice@"]
+  },
+  "hostnameClaims": {
+    "grafana.example.com": ["tag:grafana"],
+    "gitea.example.com": ["tag:gitea"]
+  }
+}
+```
+
+Register the nodes of each service with a pre-auth key for its tag, for example
+`headscale preauthkeys create --tags tag:grafana`.
+A node tagged `tag:gitea` that advertises `svc:grafana` then claims nothing.
