@@ -63,6 +63,15 @@ type PolicyManager interface {
 	// avoid a tailnet-wide recompute on every ordinary reconnect.
 	NodeNeedsPeerRecompute(node types.NodeView) bool
 
+	// ServiceHostnames returns the hostnames the node may answer for,
+	// given the service names it advertises and the policy's
+	// hostnameClaims section.
+	ServiceHostnames(node types.NodeView, services []string) []string
+
+	// HasHostnameClaims reports whether the policy has any hostnameClaims
+	// rule.
+	HasHostnameClaims() bool
+
 	// ViaRoutesForPeer computes via grant effects for a viewer-peer pair.
 	// It returns which routes should be included (peer is via-designated for viewer)
 	// and excluded (steered to a different peer). When no via grants apply,

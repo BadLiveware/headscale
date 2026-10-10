@@ -1960,6 +1960,10 @@ type Policy struct {
 	Tests               []PolicyTest       `json:"tests,omitempty"`
 	SSHTests            []SSHPolicyTest    `json:"sshTests,omitempty"`
 	RandomizeClientPort bool               `json:"randomizeClientPort,omitempty"`
+	HostnameClaims      HostnameClaims     `json:"hostnameClaims,omitempty"`
+
+	// hostnameClaimRules is [Policy.HostnameClaims] compiled by validate.
+	hostnameClaimRules []hostnameClaimRule
 }
 
 // MarshalJSON is deliberately not implemented for [Policy].
@@ -2765,6 +2769,10 @@ func (p *Policy) validate() error {
 			}
 		}
 	}
+
+	rules, claimErrs := p.compileHostnameClaims()
+	errs = append(errs, claimErrs...)
+	p.hostnameClaimRules = rules
 
 	if err := validateTests(p, p.Tests); err != nil { //nolint:noinlineerr
 		errs = append(errs, err)

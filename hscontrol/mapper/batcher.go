@@ -344,6 +344,7 @@ func (b *Batcher) AddNode(
 	case c <- initialMap:
 		// Still pendingInitial, so no broadcast can race this.
 		newEntry.lastSSHPolicy.Store(initialMap.SSHPolicy)
+		newEntry.lastDNSConfig.Store(initialMap.DNSConfig)
 
 		// Record sent peers only after confirmed delivery, mirroring the async
 		// path, and under workMu so a concurrent async bundle for this node
