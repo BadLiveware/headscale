@@ -77,6 +77,16 @@ func vipServicesBody(services ...string) *bufio.Reader {
 	return bufio.NewReader(strings.NewReader(resp))
 }
 
+// pending reports whether the fixture's fetch is still pending.
+func (fx *c2nFixture) pending() bool {
+	fx.f.mu.Lock()
+	defer fx.f.mu.Unlock()
+
+	_, ok := fx.f.byID[fx.id]
+
+	return ok
+}
+
 func (fx *c2nFixture) stored(t *testing.T) (string, []string) {
 	t.Helper()
 
@@ -95,7 +105,7 @@ func TestServicesFetchWrongMachineKeepsFetch(t *testing.T) {
 	err := fx.f.complete(fx.id, key.NewMachine().Public(), vipServicesBody("svc:grafana"))
 	require.ErrorIs(t, err, errC2NWrongMachine)
 
-	_, stillPending := fx.f.lookup(fx.id)
+	stillPending := fx.pending()
 	assert.True(t, stillPending, "a refused response must not consume the fetch")
 
 	hash, services := fx.stored(t)
@@ -151,7 +161,7 @@ func TestServicesFetchDrainCancelsPendingFetch(t *testing.T) {
 
 	fx.f.sync(fx.nodeID)
 
-	_, stillPending := fx.f.lookup(fx.id)
+	stillPending := fx.pending()
 	assert.False(t, stillPending, "draining must cancel the pending fetch")
 
 	err := fx.f.complete(fx.id, fx.node.MachineKey(), vipServicesBody("svc:grafana"))

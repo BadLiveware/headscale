@@ -300,14 +300,33 @@ func (f *servicesFetcher) callbackURL(id string) string {
 	return "https://" + host + c2nResponsePath + "?id=" + id
 }
 
-// lookup returns the pending fetch with the given ID.
-func (f *servicesFetcher) lookup(id string) (*servicesFetch, bool) {
+// takeFrom removes and returns the fetch with the given ID when machineKey
+// is the key of the node it was sent to. The check and the removal happen
+// under one lock, so a timeout cannot slip between them and reject an
+// answer that arrived in time, and a post from another machine cannot
+// consume the fetch.
+func (f *servicesFetcher) takeFrom(id string, machineKey key.MachinePublic) (*servicesFetch, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	fetch, ok := f.byID[id]
+	if !ok {
+		return nil, errUnknownC2NRequest
+	}
 
-	return fetch, ok
+	node, ok := f.h.state.GetNodeByID(fetch.nodeID)
+	if !ok || node.MachineKey() != machineKey {
+		return nil, errC2NWrongMachine
+	}
+
+	fetch.timer.Stop()
+	delete(f.byID, id)
+
+	if f.pending[fetch.nodeID] == id {
+		delete(f.pending, fetch.nodeID)
+	}
+
+	return fetch, nil
 }
 
 // take removes and returns the fetch with the given ID.
@@ -404,21 +423,9 @@ func retryDelay(failures int) time.Duration {
 
 // complete handles a node's c2n response for the fetch with the given ID.
 func (f *servicesFetcher) complete(id string, machineKey key.MachinePublic, body *bufio.Reader) error {
-	pending, ok := f.lookup(id)
-	if !ok {
-		return errUnknownC2NRequest
-	}
-
-	// Check the sender before taking the fetch, so a post from another
-	// machine cannot cancel it.
-	node, ok := f.h.state.GetNodeByID(pending.nodeID)
-	if !ok || node.MachineKey() != machineKey {
-		return errC2NWrongMachine
-	}
-
-	fetch, ok := f.take(id)
-	if !ok {
-		return errUnknownC2NRequest
+	fetch, err := f.takeFrom(id, machineKey)
+	if err != nil {
+		return err
 	}
 
 	active, err := parseVIPServicesResponse(body)
