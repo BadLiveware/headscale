@@ -683,7 +683,9 @@ func (c *TestClient) String() string {
 
 // CutNetwork black-holes the client's connections to the server without
 // closing them, as a lost network path does: the client's writes vanish and
-// nothing more reaches it. The client process keeps running.
+// nothing more reaches it. The client process keeps running. The cut is
+// permanent and covers later connections too, so Reconnect, RestartPoll
+// and ReloginAndPoll cannot reach the server afterwards.
 func (c *TestClient) CutNetwork() {
 	c.cut.Store(true)
 }
@@ -699,6 +701,11 @@ type cuttableConn struct {
 // Read discards what arrives after the cut and keeps waiting, so the
 // caller sees a silent peer until the connection is closed.
 func (c *cuttableConn) Read(b []byte) (int, error) {
+	// An empty read returns at once; looping on it would spin.
+	if len(b) == 0 {
+		return 0, nil
+	}
+
 	for {
 		n, err := c.Conn.Read(b)
 		if err != nil || !c.cut.Load() {

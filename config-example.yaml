@@ -56,18 +56,20 @@ noise:
   # ping_timeout and does not reconnect within 10 seconds, so short gaps on
   # mobile networks do not mark it offline.
   #
-  # Cost: an idle node exchanges one small PING and answer about every
-  # ping_after_idle. With 30s that is about twice the radio wake-ups of the
-  # map keepalive headscale already sends every 50-59s, which matters for
-  # phones. ping_after_idle: 60s halves that and finds lost nodes in about
-  # 70 to 90 seconds instead.
+  # Cost: an idle node exchanges one small PING and its answer about every
+  # ping_after_idle. With 30s that adds about twice as many radio wake-ups as
+  # the map keepalive headscale already sends every 50-59s, so about three
+  # times as many in total, which matters for phones. ping_after_idle: 60s
+  # halves the PING cost and finds lost nodes 30 to 90 seconds after the
+  # loss instead.
   #
   # The ping_timeout window includes the time the PING waits behind map data
   # already queued for the node, so a very large network map on a very slow
   # link can exceed it and the node reconnects.
   #
   # Set ping_after_idle to 0 to disable the check.
-  # ping_after_idle must be >= 5s when enabled; ping_timeout must be >= 1s.
+  # When the check is enabled, ping_after_idle must be >= 5s and ping_timeout
+  # must be >= 1s.
   ping_after_idle: 30s
   ping_timeout: 20s
 

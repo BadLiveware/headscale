@@ -772,6 +772,21 @@ func validateServerConfigInto(v *configValidator) {
 
 	// Validate Noise connection health check parameters
 	for _, k := range []string{"noise.ping_after_idle", "noise.ping_timeout"} {
+		// viper.GetDuration reads a malformed duration as 0, which would
+		// silently disable the check.
+		if raw, ok := viper.Get(k).(string); ok {
+			_, err := time.ParseDuration(raw)
+			if err != nil {
+				v.Add(&ConfigError{
+					Reason:  k + " is not a valid duration",
+					Current: []KV{{k, raw}},
+					Hint:    "use a Go duration such as 30s or 1m, or 0 to disable the check",
+				})
+
+				continue
+			}
+		}
+
 		if d := viper.GetDuration(k); d < 0 {
 			v.Add(&ConfigError{
 				Reason:  k + " must not be negative",
