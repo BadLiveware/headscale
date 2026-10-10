@@ -1843,7 +1843,8 @@ func validateServicesConfig(v *configValidator) {
 		})
 	}
 
-	if tol := viper.GetFloat64("services.rebalance.tolerance"); tol < 0 || tol >= 1 {
+	// Written as the valid range so NaN fails it too.
+	if tol := viper.GetFloat64("services.rebalance.tolerance"); !(tol >= 0 && tol < 1) {
 		v.Add(&ConfigError{
 			Reason:  "services.rebalance.tolerance must be at least 0 and less than 1",
 			Current: []KV{{"services.rebalance.tolerance", tol}},
