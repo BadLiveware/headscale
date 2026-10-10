@@ -327,16 +327,24 @@ func TestNodeClaimedHostnames(t *testing.T) {
 		require.NoErrorf(t, err, "%s advertising %s", node.Hostname(), service)
 	}
 
+	// Resolve every candidate's addresses once, so the polling below only
+	// checks DNS state and a lookup cannot abort a retry.
+	nodeAddrs := map[string][]string{}
+
+	for _, node := range append(slices.Clone(gateways), rogues...) {
+		ips, err := node.IPs()
+		require.NoError(t, err)
+
+		for _, ip := range ips {
+			nodeAddrs[node.Hostname()] = append(nodeAddrs[node.Hostname()], ip.String())
+		}
+	}
+
 	addrsOf := func(nodes ...TailscaleClient) []string {
 		var addrs []string
 
 		for _, node := range nodes {
-			ips, err := node.IPs()
-			require.NoError(t, err)
-
-			for _, ip := range ips {
-				addrs = append(addrs, ip.String())
-			}
+			addrs = append(addrs, nodeAddrs[node.Hostname()]...)
 		}
 
 		return addrs
