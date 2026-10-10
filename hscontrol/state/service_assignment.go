@@ -95,11 +95,13 @@ func withinTolerance(actual, target map[types.NodeID]int, tolerance float64) boo
 	return true
 }
 
-// planRebalance picks the clients to move to their rendezvous target, at
-// most perHost from each host, only from hosts that have more clients than
-// their share, the most loaded first, and stops once every host is within
-// tolerance. It returns the moves in a stable order.
-func planRebalance(clients []serviceClient, budget func(types.NodeID) int, tolerance float64) []serviceClient {
+// planRebalance picks the clients to move to their rendezvous target: at
+// most remaining[host] from each host, only from hosts that have more
+// clients than their share, the most loaded first. It decrements remaining
+// as it goes, so one budget can be shared by all services of a round, and
+// stops once every host is within tolerance. It returns the moves in a
+// stable order.
+func planRebalance(clients []serviceClient, remaining map[types.NodeID]int, tolerance float64) []serviceClient {
 	actual := map[types.NodeID]int{}
 	target := map[types.NodeID]int{}
 
@@ -125,8 +127,6 @@ func planRebalance(clients []serviceClient, budget func(types.NodeID) int, toler
 		)
 	})
 
-	taken := map[types.NodeID]int{}
-
 	var moves []serviceClient
 
 	for _, c := range candidates {
@@ -134,13 +134,13 @@ func planRebalance(clients []serviceClient, budget func(types.NodeID) int, toler
 			break
 		}
 
-		if taken[c.from] >= budget(c.from) || actual[c.from] <= target[c.from] {
+		if remaining[c.from] <= 0 || actual[c.from] <= target[c.from] {
 			continue
 		}
 
 		actual[c.from]--
 		actual[c.to]++
-		taken[c.from]++
+		remaining[c.from]--
 
 		moves = append(moves, c)
 	}
@@ -167,7 +167,7 @@ const rebalanceCarryLimit = 1 - 1e-6
 func (sv *services) rebalanceBudget(
 	cfg types.ServicesRebalanceConfig,
 	hosts map[types.NodeID][]tailcfg.ServiceName,
-) func(types.NodeID) int {
+) map[types.NodeID]int {
 	perRound := float64(cfg.MovesPerHostPerMinute) * cfg.Interval.Minutes()
 
 	credit := make(map[types.NodeID]float64, len(hosts))
@@ -177,9 +177,12 @@ func (sv *services) rebalanceBudget(
 
 	sv.credit = credit
 
-	return func(h types.NodeID) int {
-		return int(credit[h] + rebalanceCreditEpsilon)
+	moves := make(map[types.NodeID]int, len(credit))
+	for h, c := range credit {
+		moves[h] = int(c + rebalanceCreditEpsilon)
 	}
+
+	return moves
 }
 
 // RebalanceServices moves a bounded number of clients towards their
@@ -214,7 +217,9 @@ func (s *State) rebalanceServicesLocked() bool {
 		return false
 	}
 
-	budget := s.services.rebalanceBudget(s.cfg.Services.Rebalance, idx.byNode)
+	// One budget per host for the whole round, shared by all the services
+	// the host serves: the rate bounds the client resets per host.
+	remaining := s.services.rebalanceBudget(s.cfg.Services.Rebalance, idx.byNode)
 	nodes := s.nodeStore.ListNodes()
 
 	next := &serviceHostIndex{
@@ -251,7 +256,7 @@ func (s *State) rebalanceServicesLocked() bool {
 			clients = append(clients, serviceClient{viewer: viewer.ID(), from: from, to: to})
 		}
 
-		for _, m := range planRebalance(clients, budget, s.cfg.Services.Rebalance.Tolerance) {
+		for _, m := range planRebalance(clients, remaining, s.cfg.Services.Rebalance.Tolerance) {
 			s.services.credit[m.from]--
 			delete(next.assigned[name], m.viewer)
 			moved[m.viewer] = append(moved[m.viewer], m.from, m.to)

@@ -111,6 +111,7 @@ func BenchmarkServiceRefreshHostChange(b *testing.B) {
 			for b.Loop() {
 				s.services.index.Store(nil)
 				s.refreshServiceHostsLocked()
+				s.drainServiceMoves()
 			}
 		})
 	}
@@ -144,6 +145,7 @@ func BenchmarkServiceRebalance(b *testing.B) {
 				s.services.index.Store(skewed)
 				s.services.balanced = nil
 				s.rebalanceServicesLocked()
+				s.drainServiceMoves()
 			}
 		})
 	}
