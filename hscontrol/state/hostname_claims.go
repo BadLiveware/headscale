@@ -68,7 +68,9 @@ func deriveClaimRecords(
 	)
 
 	for _, node := range nodes.All() {
-		if !node.Online() || node.AdvertisedServices().Len() == 0 {
+		// Online is cached and only rewritten when expiry is processed; a
+		// key that has just expired must not claim in the meantime.
+		if !node.Online() || node.IsExpired() || node.AdvertisedServices().Len() == 0 {
 			continue
 		}
 

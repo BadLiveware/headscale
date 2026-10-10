@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/stretchr/testify/assert"
@@ -45,7 +46,14 @@ func TestDeriveClaimRecords(t *testing.T) {
 		return names
 	}
 
+	// expired is still marked online, as it is between the key's expiry
+	// and the next expiry check, but must not claim.
+	expiredAt := time.Now().Add(-time.Minute)
+	expired := node(6, true, "100.64.0.6", "", "svc:grafana").AsStruct()
+	expired.Expiry = &expiredAt
+
 	nodes := views.SliceOf([]types.NodeView{
+		expired.View(),
 		node(3, true, "100.64.0.3", "fd7a:115c:a1e0::3", "svc:grafana"),
 		node(1, true, "100.64.0.1", "fd7a:115c:a1e0::1", "svc:grafana"),
 		node(2, false, "100.64.0.2", "", "svc:grafana"),
@@ -65,7 +73,8 @@ func TestDeriveClaimRecords(t *testing.T) {
 		{nodeID: 4, record: tailcfg.DNSRecord{Name: "web.gw.example.com", Type: "A", Value: "100.64.0.4"}},
 	}
 
-	assert.Equal(t, want, got, "offline node 2, node 5 without services and names in the base domain must be absent")
+	assert.Equal(t, want, got,
+		"offline node 2, expired node 6, node 5 without services and names in the base domain must be absent")
 }
 
 func TestOrderClaimRecordsForViewer(t *testing.T) {
