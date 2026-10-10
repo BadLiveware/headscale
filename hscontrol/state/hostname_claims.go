@@ -2,6 +2,7 @@ package state
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -42,8 +43,8 @@ type hostnameClaims struct {
 	// [State.HostnameClaimsInUse].
 	inUse atomic.Bool
 
-	// warned holds the names already reported as shadowing the MagicDNS
-	// base domain, so each is logged once. Guarded by mu.
+	// warned holds the names that shadowed the MagicDNS base domain at the
+	// last refresh, so each is logged once while it does. Guarded by mu.
 	warned map[string]struct{}
 }
 
@@ -116,27 +117,35 @@ func deriveClaimRecords(
 // or going offline, a node's advertised services, tags or addresses, a
 // node's deletion, and a policy change.
 func (s *State) refreshHostnameClaims() change.Change {
+	// Without a rule nothing can be claimed, and without published records
+	// nothing must be withdrawn: skip the scan of every node, which would
+	// otherwise run on every connect and disconnect.
+	if !s.polMan.HasHostnameClaims() && !s.claims.inUse.Load() {
+		return change.Change{}
+	}
+
 	s.claims.mu.Lock()
 	defer s.claims.mu.Unlock()
 
 	next, shadowed := deriveClaimRecords(s.nodeStore.ListNodes(), s.polMan.ServiceHostnames, s.cfg.BaseDomain)
 
+	// Warn once per shadowing name while it shadows; forget names that no
+	// longer do, so the set stays as small as the current claims.
+	warned := make(map[string]struct{}, len(shadowed))
 	for _, name := range shadowed {
+		warned[name] = struct{}{}
+
 		if _, done := s.claims.warned[name]; done {
 			continue
 		}
-
-		if s.claims.warned == nil {
-			s.claims.warned = make(map[string]struct{})
-		}
-
-		s.claims.warned[name] = struct{}{}
 
 		log.Warn().
 			Str("hostname", name).
 			Str("base_domain", s.cfg.BaseDomain).
 			Msg("ignoring claimed hostname directly below the MagicDNS base domain; use a zone outside it or a subzone")
 	}
+
+	s.claims.warned = warned
 
 	if len(next) > 0 {
 		s.claims.inUse.Store(true)
@@ -248,17 +257,66 @@ func rendezvousScore(viewer, node types.NodeID) uint64 {
 	return z ^ (z >> 31)
 }
 
+// ErrServicesHashMoved is returned by [State.SetNodeAdvertisedServices] when
+// the node reported a different services hash after the list was requested.
+var ErrServicesHashMoved = errors.New("node reported a newer services hash")
+
 // SetNodeAdvertisedServices stores the services a node reports as active
 // together with the [tailcfg.Hostinfo.ServicesHash] they belong to, and
 // returns the DNS change when this alters the claimed hostnames.
+//
+// It stores them only while hash is still the hash in the node's Hostinfo,
+// checked in the same NodeStore write: a list fetched for an older hash is
+// stale and is never applied, so a withdrawn service cannot come back from a
+// late answer. It then returns [ErrServicesHashMoved].
 func (s *State) SetNodeAdvertisedServices(
 	id types.NodeID,
 	hash string,
 	services []string,
 ) (change.Change, error) {
+	var moved bool
+
 	_, ok := s.nodeStore.UpdateNode(id, func(n *types.Node) {
+		var current string
+		if n.Hostinfo != nil {
+			current = n.Hostinfo.ServicesHash
+		}
+
+		if current != hash {
+			moved = true
+
+			return
+		}
+
 		n.AdvertisedServices = services
 		n.AdvertisedServicesHash = hash
+	})
+	if !ok {
+		return change.Change{}, fmt.Errorf("%w: %d", ErrNodeNotFound, id)
+	}
+
+	if moved {
+		return change.Change{}, ErrServicesHashMoved
+	}
+
+	return s.refreshHostnameClaims(), nil
+}
+
+// WithdrawStaleAdvertisedServices drops a node's stored services when they
+// belong to an older hash than the one in its Hostinfo, and returns the DNS
+// change. Call it when the list for the new hash cannot be fetched: the node
+// changed its services, maybe withdrawing one, so the old list must not keep
+// claiming. The stored hash stays, so the list is still fetched again.
+func (s *State) WithdrawStaleAdvertisedServices(id types.NodeID) (change.Change, error) {
+	_, ok := s.nodeStore.UpdateNode(id, func(n *types.Node) {
+		var current string
+		if n.Hostinfo != nil {
+			current = n.Hostinfo.ServicesHash
+		}
+
+		if current != n.AdvertisedServicesHash {
+			n.AdvertisedServices = nil
+		}
 	})
 	if !ok {
 		return change.Change{}, fmt.Errorf("%w: %d", ErrNodeNotFound, id)

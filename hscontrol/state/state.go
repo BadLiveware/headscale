@@ -957,6 +957,10 @@ func (s *State) SetNodeExpiry(nodeID types.NodeID, expiry *time.Time) (types.Nod
 		recompute = change.PolicyChange()
 	}
 
+	// The NodeStore holds the new online state, so the claims follow it
+	// on every return below, the failed database writes included.
+	recompute = recompute.Merge(s.refreshHostnameClaims())
+
 	// Persist expiry change to database directly since persistNodeAndRefreshPolicy omits expiry.
 	err := s.db.NodeSetExpiry(nodeID, expiry)
 	if err != nil {
@@ -973,7 +977,7 @@ func (s *State) SetNodeExpiry(nodeID types.NodeID, expiry *time.Time) (types.Nod
 
 	// Resolve expiry and online status together from the current snapshot
 	// when the mapper sends the change, including after a rapid restoration.
-	c = c.Merge(change.NodeAdded(n.ID())).Merge(recompute).Merge(s.refreshHostnameClaims())
+	c = c.Merge(change.NodeAdded(n.ID())).Merge(recompute)
 
 	return n, c, nil
 }
