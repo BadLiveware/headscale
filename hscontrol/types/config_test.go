@@ -966,6 +966,16 @@ func TestNoisePingConfig(t *testing.T) {
 			want:  NoiseConfig{PingAfterIdle: 0, PingTimeout: 20 * time.Second},
 		},
 		{
+			name:      "idle-malformed",
+			noise:     "  ping_after_idle: 30sec\n",
+			wantError: "noise.ping_after_idle is not a valid duration",
+		},
+		{
+			name:      "timeout-malformed",
+			noise:     "  ping_timeout: soon\n",
+			wantError: "noise.ping_timeout is not a valid duration",
+		},
+		{
 			name:      "idle-negative",
 			noise:     "  ping_after_idle: -30s\n",
 			wantError: "noise.ping_after_idle must not be negative",
