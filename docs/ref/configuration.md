@@ -63,17 +63,19 @@ A client on a bad network is marked offline only when it cannot answer for more 
 not reconnect within 10 seconds.
 Lower values find lost nodes sooner, but mark nodes on slow or unstable networks offline more often, and make idle
 devices, such as phones, wake their radio more often.
+When the check is enabled, `noise.ping_after_idle` must be at least `5s` and `noise.ping_timeout` at least `1s`;
+`headscale configtest` rejects lower, negative and malformed values.
 
-The cost of the defaults: an idle node exchanges one small PING and answer about every 30 seconds.
-Headscale already sends each node a map keepalive every 50 to 59 seconds, so for an idle phone the check about doubles
-the radio wake-ups caused by Headscale.
-With `noise.ping_after_idle: 60s` the cost halves, and lost nodes are offline about 70 to 90 seconds after the loss.
+The cost of the defaults: an idle node exchanges one small PING and its answer about every 30 seconds.
+Headscale already sends each node a map keepalive every 50 to 59 seconds, so for an idle phone the check adds about
+twice as many radio wake-ups as the keepalive, about three times as many in total.
+With `noise.ping_after_idle: 60s` the PING cost halves, and lost nodes are offline 30 to 90 seconds after the loss.
 
 The `noise.ping_timeout` window includes the time the PING waits behind map data already queued for the node.
 A very large network map sent over a very slow link can therefore exceed it; the node then reconnects.
 
-Headscale logs a closed connection with the message `timeout waiting for PING response` and counts it in the
-`headscale_noise_http2_errors_total{type="conn_close_lost_ping"}` metric.
+Headscale logs a closed connection as a warning with the message `timeout waiting for PING response`, and counts it in
+the `headscale_noise_http2_errors_total{type="conn_close_lost_ping"}` metric.
 Set `noise.ping_after_idle: 0` to disable the check.
-Headscale versions without the check ignore the `noise.ping_after_idle` and `noise.ping_timeout` keys, so a configuration
-that sets them still loads after a downgrade.
+Headscale versions without the check ignore the `noise.ping_after_idle` and `noise.ping_timeout` keys, so a
+configuration that sets them still loads after a downgrade.
