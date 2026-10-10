@@ -44,6 +44,8 @@ Only tagged nodes host services.
 - If the address pool has no room, the service gets no VIPs: nobody can reach it, Headscale logs an error and counts it
   in the `headscale_service_vip_allocation_failures_total` metric, and tries again on the next policy change or
   restart.
+- Headscale allocates the VIPs only once the policy is stored, so a policy `tests` entry can check a service only after
+  the service exists: add the service first, then the tests that use it.
 - `svc:<label>` is a destination for grants and ACLs (`"svc:grafana:443"` in an ACL).
   It cannot be a source, an SSH destination or a `nodeAttrs` target.
 - A wildcard destination (`"*"`, as in an allow-all policy) contains every VIP: it lets its sources reach every service.

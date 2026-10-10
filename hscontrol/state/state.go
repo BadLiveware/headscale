@@ -306,6 +306,9 @@ func NewState(cfg *types.Config) (*State, error) {
 
 	_, err = s.loadServiceVIPs()
 	if err != nil {
+		// Stop the NodeStore and close the database opened above.
+		_ = s.Close()
+
 		return nil, fmt.Errorf("loading service addresses: %w", err)
 	}
 
@@ -1350,12 +1353,9 @@ func (s *State) SetPolicy(pol []byte) (bool, error) {
 		return changed, err
 	}
 
-	servicesChanged, err := s.loadServiceVIPs()
-	if err != nil {
-		log.Error().Err(err).Msg("loading service addresses after a policy change")
-	}
-
-	changed = changed || servicesChanged
+	// No VIPs are allocated here: the API calls SetPolicy to check a
+	// policy before it stores it, and a rejected policy must not use up
+	// addresses. ReloadPolicy allocates once the policy is stored.
 
 	// Clear SSH check auth times when policy changes.
 	s.ClearSSHCheckAuth()

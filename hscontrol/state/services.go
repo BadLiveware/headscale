@@ -323,8 +323,10 @@ func (s *State) refreshServiceHostsLocked() bool {
 	s.services.mu.Lock()
 	defer s.services.mu.Unlock()
 
+	// Without any service there is nothing to refresh; this runs on every
+	// node event.
 	vips := s.services.vips.Load()
-	if vips == nil {
+	if vips == nil || len(*vips) == 0 {
 		return false
 	}
 

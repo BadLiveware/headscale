@@ -180,3 +180,29 @@ func TestServiceVIPsRetriedAfterPolicyError(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, wrapped.calls, "once given, they are not given again")
 }
+
+// TestServiceVIPsNotAllocatedByPolicyCheck checks that SetPolicy, which
+// the API calls to check a policy before storing it, allocates no VIPs;
+// ReloadPolicy does once the policy is stored.
+func TestServiceVIPsNotAllocatedByPolicyCheck(t *testing.T) {
+	cfg := allocTestConfig(t)
+
+	s, err := NewState(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Close() })
+
+	_, err = s.SetPolicy([]byte(allocPolicyOneService))
+	require.NoError(t, err)
+
+	stored, err := s.db.ListServices()
+	require.NoError(t, err)
+	require.Empty(t, stored, "a checked policy uses up no addresses")
+	require.Empty(t, s.ServiceVIPs("svc:grafana"))
+
+	_, err = s.SetPolicyInDB(allocPolicyOneService)
+	require.NoError(t, err)
+	_, err = s.ReloadPolicy()
+	require.NoError(t, err)
+
+	require.Len(t, s.ServiceVIPs("svc:grafana"), 1, "the stored policy gets its VIPs")
+}
