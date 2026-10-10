@@ -20,6 +20,7 @@ var (
 	ErrServiceInvalidName = errors.New("invalid service name")
 	ErrServiceNoHosts     = errors.New("autoApprovers.services entry lists no tags")
 	ErrServiceOnlyDst     = errors.New("a service can only be a destination")
+	ErrServiceNotInSSH    = errors.New("SSH does not support services")
 )
 
 // servicePrefix starts every service name, `svc:<label>`.
@@ -45,7 +46,19 @@ func (s *Service) Validate() error {
 }
 
 func (s *Service) UnmarshalJSON(b []byte) error {
-	*s = Service(strings.Trim(string(b), `"`))
+	var vs string
+
+	err := json.Unmarshal(b, &vs)
+	if err != nil {
+		return err
+	}
+
+	vs = strings.TrimSpace(vs)
+	if !isService(vs) {
+		return fmt.Errorf("%w: %q", ErrServiceInvalidName, vs)
+	}
+
+	*s = Service(vs)
 
 	return s.Validate()
 }
@@ -83,6 +96,15 @@ type ServiceApprovers map[tailcfg.ServiceName][]Tag
 // validateServices checks the autoApprovers.services section and every
 // service alias in ACLs and grants.
 func (p *Policy) validateServices() []error {
+	return slices.Concat(
+		p.validateServiceApprovers(),
+		p.validateServiceRules(),
+		p.validateServiceElsewhere(),
+	)
+}
+
+// validateServiceApprovers checks the autoApprovers.services section.
+func (p *Policy) validateServiceApprovers() []error {
 	var errs []error
 
 	for name, tags := range p.AutoApprovers.Services {
@@ -102,6 +124,14 @@ func (p *Policy) validateServices() []error {
 			}
 		}
 	}
+
+	return errs
+}
+
+// validateServiceRules checks service aliases in ACLs and grants: only as
+// destinations, defined, and not with via.
+func (p *Policy) validateServiceRules() []error {
+	var errs []error
 
 	defined := func(s *Service) error {
 		if _, ok := p.AutoApprovers.Services[tailcfg.ServiceName(*s)]; ok {
@@ -147,6 +177,14 @@ func (p *Policy) validateServices() []error {
 		}
 	}
 
+	return errs
+}
+
+// validateServiceElsewhere rejects service aliases in SSH rules, nodeAttrs
+// and policy tests, except as a tests destination.
+func (p *Policy) validateServiceElsewhere() []error {
+	var errs []error
+
 	for _, ssh := range p.SSHs {
 		for _, src := range ssh.Sources {
 			if s, ok := src.(*Service); ok {
@@ -154,9 +192,30 @@ func (p *Policy) validateServices() []error {
 			}
 		}
 
-		for _, dst := range ssh.Destinations {
+		// SSH destinations reject services when parsed ("alias not
+		// supported for SSH destination").
+	}
+
+	for i, test := range p.Tests {
+		alias, err := parseAlias(strings.TrimSpace(test.Src))
+		if err != nil {
+			// validateTests reports an unparsable source.
+			continue
+		}
+
+		if s, ok := alias.(*Service); ok {
+			errs = append(errs, fmt.Errorf("%w: test %d src %q", ErrServiceOnlyDst, i, string(*s)))
+		}
+	}
+
+	for i, test := range p.SSHTests {
+		if s, ok := test.Src.(*Service); ok {
+			errs = append(errs, fmt.Errorf("%w: sshTest %d src %q", ErrServiceOnlyDst, i, string(*s)))
+		}
+
+		for _, dst := range test.Dst {
 			if s, ok := dst.(*Service); ok {
-				errs = append(errs, fmt.Errorf("%w: ssh dst %q is not supported", ErrServiceOnlyDst, string(*s)))
+				errs = append(errs, fmt.Errorf("%w: sshTest %d dst %q", ErrServiceNotInSSH, i, string(*s)))
 			}
 		}
 	}

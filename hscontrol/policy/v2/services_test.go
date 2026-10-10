@@ -92,6 +92,42 @@ func TestServicesValidation(t *testing.T) {
 			wantErr: "invalid service name",
 		},
 		{
+			name: "service-as-test-source",
+			policy: `{
+				"tagOwners": {"tag:grafana": ["user@"]},
+				"autoApprovers": {"services": {"svc:grafana": ["tag:grafana"]}},
+				"tests": [{"src": "svc:grafana", "accept": ["tag:grafana:443"]}]
+			}`,
+			wantErr: "only be a destination",
+		},
+		{
+			name: "service-as-ssh-test-source",
+			policy: `{
+				"tagOwners": {"tag:grafana": ["user@"]},
+				"autoApprovers": {"services": {"svc:grafana": ["tag:grafana"]}},
+				"sshTests": [{"src": "svc:grafana", "dst": ["tag:grafana"], "accept": ["root"]}]
+			}`,
+			wantErr: "only be a destination",
+		},
+		{
+			name: "service-as-ssh-destination",
+			policy: `{
+				"tagOwners": {"tag:grafana": ["user@"]},
+				"autoApprovers": {"services": {"svc:grafana": ["tag:grafana"]}},
+				"ssh": [{"action": "accept", "src": ["user@"], "dst": ["svc:grafana"], "users": ["root"]}]
+			}`,
+			wantErr: "alias not supported for SSH destination",
+		},
+		{
+			name: "service-as-ssh-test-destination",
+			policy: `{
+				"tagOwners": {"tag:grafana": ["user@"]},
+				"autoApprovers": {"services": {"svc:grafana": ["tag:grafana"]}},
+				"sshTests": [{"src": "user@", "dst": ["svc:grafana"], "accept": ["root"]}]
+			}`,
+			wantErr: "SSH does not support services",
+		},
+		{
 			name: "user-as-host",
 			policy: `{
 				"autoApprovers": {"services": {"svc:grafana": ["user@"]}}
@@ -230,4 +266,45 @@ func TestServiceVIPsKeptAcrossPolicyReload(t *testing.T) {
 	rules, err := pm.FilterForNode(nodes[0].View())
 	require.NoError(t, err)
 	require.Len(t, rules, 1, "the VIPs survive a policy reload")
+	assert.ElementsMatch(t, []tailcfg.NetPortRange{
+		{IP: testVIP4.String(), Ports: tailcfg.PortRange{First: 443, Last: 443}},
+		{IP: testVIP6.String(), Ports: tailcfg.PortRange{First: 443, Last: 443}},
+	}, rules[0].DstPorts)
+}
+
+// TestServicePolicyTests checks that a policy's tests block can assert
+// access to a service: SetPolicy evaluates the candidate with the current
+// VIPs.
+func TestServicePolicyTests(t *testing.T) {
+	pm, _ := newServicesTestManager(t)
+
+	withTests := func(tests string) []byte {
+		return []byte(`{
+			"tagOwners": {
+				"tag:grafana": ["user@"],
+				"tag:gitea": ["user@"],
+				"tag:client": ["user@"]
+			},
+			"autoApprovers": {"services": {"svc:grafana": ["tag:grafana"]}},
+			"grants": [{"src": ["tag:client"], "dst": ["svc:grafana"], "ip": ["tcp:443"]}],
+			"tests": ` + tests + `
+		}`)
+	}
+
+	_, err := pm.SetPolicy(withTests(`[{"src": "tag:client", "accept": ["svc:grafana:443"], "deny": ["svc:grafana:80"]}]`))
+	require.NoError(t, err)
+
+	_, err = pm.SetPolicy(withTests(`[{"src": "tag:gitea", "accept": ["svc:grafana:443"]}]`))
+	require.Error(t, err, "a node without the grant fails the accept test")
+}
+
+func TestServiceAliasUnmarshalJSON(t *testing.T) {
+	var s Service
+
+	require.NoError(t, s.UnmarshalJSON([]byte(`" svc:grafana "`)))
+	assert.Equal(t, Service("svc:grafana"), s)
+
+	require.ErrorIs(t, s.UnmarshalJSON([]byte(`"grafana"`)), ErrServiceInvalidName)
+	require.ErrorIs(t, s.UnmarshalJSON([]byte(`"svc:Bad_Name"`)), ErrServiceInvalidName)
+	require.Error(t, s.UnmarshalJSON([]byte(`svc:grafana`)), "not a JSON string")
 }
