@@ -43,22 +43,26 @@ func ensureServicesTable(tx *gorm.DB) error {
 		return nil
 	}
 
-	ddl := servicesDDLSQLite
-	if tx.Name() != gormDialectSQLite {
-		ddl = servicesDDLPostgres
-	}
+	// One transaction for the table and its index: a failed index would
+	// otherwise leave a table that the HasTable check above then accepts.
+	return tx.Transaction(func(tx *gorm.DB) error {
+		ddl := servicesDDLSQLite
+		if tx.Name() != gormDialectSQLite {
+			ddl = servicesDDLPostgres
+		}
 
-	err := tx.Exec(ddl).Error
-	if err != nil {
-		return fmt.Errorf("creating services table: %w", err)
-	}
+		err := tx.Exec(ddl).Error
+		if err != nil {
+			return fmt.Errorf("creating services table: %w", err)
+		}
 
-	err = tx.Exec(servicesNameIndex).Error
-	if err != nil {
-		return fmt.Errorf("creating services name index: %w", err)
-	}
+		err = tx.Exec(servicesNameIndex).Error
+		if err != nil {
+			return fmt.Errorf("creating services name index: %w", err)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 // ListServices returns every service that has virtual IP addresses.
@@ -78,7 +82,7 @@ func (hsdb *HSDatabase) ListServices() ([]types.Service, error) {
 // CreateService allocates virtual IP addresses for a service and stores
 // them. Addresses come from the node allocator, so a VIP never collides
 // with a node address. On any failure, the allocated addresses go back to
-// the allocator.
+// the allocator, which can hand them out again.
 func (hsdb *HSDatabase) CreateService(alloc *IPAllocator, name string) (types.Service, error) {
 	ipv4, ipv6, err := alloc.Next()
 	if err != nil {
@@ -93,7 +97,7 @@ func (hsdb *HSDatabase) CreateService(alloc *IPAllocator, name string) (types.Se
 
 	err = hsdb.DB.Create(&svc).Error
 	if err != nil {
-		alloc.FreeIPs(addrsOf(ipv4, ipv6))
+		alloc.Release(addrsOf(ipv4, ipv6))
 
 		return types.Service{}, fmt.Errorf("storing service %q: %w", name, err)
 	}

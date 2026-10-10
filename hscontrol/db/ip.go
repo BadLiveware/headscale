@@ -173,7 +173,7 @@ func (i *IPAllocator) Next() (*netip.Addr, *netip.Addr, error) {
 		ret6, err = i.allocateNext(&i.prev6, i.prefix6)
 		if err != nil {
 			if ret4 != nil {
-				i.FreeIPs([]netip.Addr{*ret4})
+				i.Release([]netip.Addr{*ret4})
 			}
 
 			return nil, nil, fmt.Errorf("allocating IPv6 address: %w", err)
@@ -402,6 +402,28 @@ func (db *HSDatabase) BackfillNodeIPs(i *IPAllocator) ([]string, error) {
 	})
 
 	return ret, err
+}
+
+// Release returns addresses that Next just handed out but that were never
+// used, for example because storing them failed. Unlike [IPAllocator.FreeIPs]
+// it also steps the sequential cursor back when an address is the last one
+// handed out, so the next allocation can use it again; the sequential
+// strategy never wraps, and a freed address behind the cursor would stay
+// unused until a restart.
+func (i *IPAllocator) Release(ips []netip.Addr) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+
+	for _, ip := range ips {
+		i.usedIPs.Remove(ip)
+
+		switch ip {
+		case i.prev4:
+			i.prev4 = ip.Prev()
+		case i.prev6:
+			i.prev6 = ip.Prev()
+		}
+	}
 }
 
 func (i *IPAllocator) FreeIPs(ips []netip.Addr) {

@@ -81,3 +81,25 @@ func TestServicesSQLite(t *testing.T) {
 func TestServicesPostgres(t *testing.T) {
 	testServicesStableAndDisjoint(t, newPostgresTestDB(t))
 }
+
+// TestServiceFailedStoreReusesAddresses checks that addresses of a failed
+// service insert can be handed out again by the sequential allocator.
+func TestServiceFailedStoreReusesAddresses(t *testing.T) {
+	db, err := newSQLiteTestDB()
+	require.NoError(t, err)
+
+	alloc, err := NewIPAllocator(db, mpp("100.64.0.0/10"), mpp("fd7a:115c:a1e0::/48"), types.IPAllocationStrategySequential)
+	require.NoError(t, err)
+
+	first, err := db.CreateService(alloc, "svc:grafana")
+	require.NoError(t, err)
+
+	_, err = db.CreateService(alloc, "svc:grafana")
+	require.Error(t, err, "the duplicate name fails to store")
+
+	next, err := db.CreateService(alloc, "svc:gitea")
+	require.NoError(t, err)
+
+	assert.Equal(t, first.IPv4.Next(), *next.IPv4, "the released IPv4 address is used next")
+	assert.Equal(t, first.IPv6.Next(), *next.IPv6, "the released IPv6 address is used next")
+}
