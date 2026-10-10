@@ -1986,7 +1986,21 @@ func TestNoisePingFindsCutNode(t *testing.T) {
 	err = scenario.WaitForTailscaleSync()
 	requireNoErrSync(t, err)
 
-	cut := allClients[0]
+	// Cut a client whose version appears twice, so every tested version
+	// keeps a healthy idle node through the test. The clients are created
+	// with the versions in turn, so the first version gets two.
+	var cut TailscaleClient
+
+	for _, c := range allClients {
+		if c.Version() == MustTestVersions[0] {
+			cut = c
+
+			break
+		}
+	}
+
+	require.NotNil(t, cut, "no client with version %s", MustTestVersions[0])
+
 	hsIP := headscale.GetIPInNetwork(scenario.Networks()[0])
 
 	start := time.Now()
@@ -2000,12 +2014,23 @@ func TestNoisePingFindsCutNode(t *testing.T) {
 
 	var cutOfflineAfter time.Duration
 
+	offlineBound := integrationutil.ScaledTimeout(pingAfterIdle + pingTimeout + offlineGrace + 10*time.Second)
+
 	// One ListNodes call per tick checks both properties: the cut node goes
-	// offline in time, and no other node ever goes offline.
-	deadline := start.Add(pingRounds * pingAfterIdle)
+	// offline in time, and no other node ever goes offline. The watch lasts
+	// several PING rounds, and at least as long as the offline bound.
+	deadline := start.Add(max(integrationutil.ScaledTimeout(pingRounds*pingAfterIdle), offlineBound))
 	for time.Now().Before(deadline) {
-		nodes, err := headscale.ListNodes()
-		require.NoError(t, err)
+		// Retry a failed read; the observed states are checked at once.
+		var nodes []*clientv1.Node
+
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			var err error
+
+			nodes, err = headscale.ListNodes()
+			assert.NoError(c, err)
+		}, 10*time.Second, time.Second, "listing nodes")
+		require.NotEmpty(t, nodes)
 
 		for _, node := range nodes {
 			if node.Name == cut.Hostname() {
@@ -2026,5 +2051,5 @@ func TestNoisePingFindsCutNode(t *testing.T) {
 	require.NotZero(t, cutOfflineAfter, "cut node %s still online after %s", cut.Hostname(), time.Since(start))
 	t.Logf("cut node offline after %s; idle nodes stayed online for %s", cutOfflineAfter, time.Since(start))
 
-	assert.LessOrEqual(t, cutOfflineAfter, integrationutil.ScaledTimeout(pingAfterIdle+pingTimeout+offlineGrace+10*time.Second))
+	assert.LessOrEqual(t, cutOfflineAfter, offlineBound)
 }
