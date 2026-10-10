@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/juanfont/headscale/hscontrol/state"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"github.com/juanfont/headscale/hscontrol/types/change"
 	"github.com/juanfont/headscale/hscontrol/util/zlog/zf"
@@ -55,24 +56,43 @@ type servicesFetch struct {
 	timer  *time.Timer
 }
 
-// fetchBackoff tracks the unanswered fetches of one node.
+// fetchBackoff tracks the failed fetches of one node for one hash.
 type fetchBackoff struct {
 	hash     string
 	failures int
 	retryAt  time.Time
+	retry    *time.Timer
 }
 
 // servicesFetcher keeps the advertised services that Headscale holds for a
 // node in step with the [tailcfg.Hostinfo.ServicesHash] the node reports. A
 // client only sends that hash; when it differs from the hash of the stored
 // list, the fetcher asks the node for the list with a c2n request.
+//
+// Rules, which hold for every node:
+//   - At most one fetch is pending, for the node's current hash; a new hash
+//     or an empty hash cancels it.
+//   - A fetch ID is used once, and only an answer over the Noise session of
+//     the node that was asked counts.
+//   - An answer is stored only while its hash is still the node's current
+//     hash ([state.State.SetNodeAdvertisedServices] checks it atomically).
+//   - A failed fetch (no answer in time, or a bad answer) is retried with a
+//     doubling wait, and the old list stops claiming
+//     ([state.State.WithdrawStaleAdvertisedServices]), so a node that may
+//     have withdrawn a service does not keep it for long.
 type servicesFetcher struct {
 	h *Headscale
 
 	mu      sync.Mutex
+	closed  bool
 	byID    map[string]*servicesFetch
 	pending map[types.NodeID]string
 	backoff map[types.NodeID]*fetchBackoff
+
+	// syncAll runs one pass at a time; a request during a pass makes the
+	// pass run once more.
+	syncAllRunning bool
+	syncAllAgain   bool
 }
 
 func newServicesFetcher(h *Headscale) *servicesFetcher {
@@ -84,12 +104,78 @@ func newServicesFetcher(h *Headscale) *servicesFetcher {
 	}
 }
 
+// stop cancels every pending fetch and retry; later calls do nothing.
+func (f *servicesFetcher) stop() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.closed = true
+
+	for id, fetch := range f.byID {
+		fetch.timer.Stop()
+		delete(f.byID, id)
+	}
+
+	for nodeID, b := range f.backoff {
+		if b.retry != nil {
+			b.retry.Stop()
+		}
+
+		delete(f.backoff, nodeID)
+	}
+
+	clear(f.pending)
+}
+
 // syncAll runs [servicesFetcher.sync] for every node. A policy reload calls
 // it, because a policy that gains hostnameClaims rules or services makes the services
 // of connected nodes matter, and no map request may come from them soon.
+// Overlapping calls share one pass, which runs once more if asked during it.
 func (f *servicesFetcher) syncAll() {
-	for _, node := range f.h.state.ListNodes().All() {
-		f.sync(node.ID())
+	f.mu.Lock()
+	if f.syncAllRunning {
+		f.syncAllAgain = true
+		f.mu.Unlock()
+
+		return
+	}
+
+	f.syncAllRunning = true
+	f.mu.Unlock()
+
+	for {
+		for _, node := range f.h.state.ListNodes().All() {
+			f.sync(node.ID())
+		}
+
+		f.mu.Lock()
+		if !f.syncAllAgain || f.closed {
+			f.syncAllRunning = false
+			f.syncAllAgain = false
+			f.mu.Unlock()
+
+			return
+		}
+
+		f.syncAllAgain = false
+		f.mu.Unlock()
+	}
+}
+
+// cancelLocked drops the pending fetch and the backoff of a node.
+func (f *servicesFetcher) cancelLocked(nodeID types.NodeID) {
+	if id, ok := f.pending[nodeID]; ok {
+		f.byID[id].timer.Stop()
+		delete(f.byID, id)
+		delete(f.pending, nodeID)
+	}
+
+	if b, ok := f.backoff[nodeID]; ok {
+		if b.retry != nil {
+			b.retry.Stop()
+		}
+
+		delete(f.backoff, nodeID)
 	}
 }
 
@@ -108,18 +194,22 @@ func (f *servicesFetcher) sync(nodeID types.NodeID) {
 		want = node.Hostinfo().ServicesHash()
 	}
 
-	if want == node.AdvertisedServicesHash() {
+	f.mu.Lock()
+
+	if f.closed {
+		f.mu.Unlock()
+
 		return
 	}
 
-	if want == "" {
-		c, err := f.h.state.SetNodeAdvertisedServices(nodeID, "", nil)
-		if err != nil {
-			log.Debug().Err(err).Uint64(zf.NodeID, nodeID.Uint64()).Msg("clearing advertised services")
-		}
+	if want == node.AdvertisedServicesHash() || want == "" {
+		// Nothing to fetch: the list is current, or the node advertises
+		// nothing. A fetch for an older hash must not land afterwards.
+		f.cancelLocked(nodeID)
+		f.mu.Unlock()
 
-		if !c.IsEmpty() {
-			f.h.Change(c)
+		if want == "" && node.AdvertisedServicesHash() != "" {
+			f.store(nodeID, "", nil)
 		}
 
 		return
@@ -128,24 +218,25 @@ func (f *servicesFetcher) sync(nodeID types.NodeID) {
 	// Without a hostnameClaims rule or a service in autoApprovers.services
 	// the services cannot matter; a policy reload runs syncAll when that
 	// changes.
-	if !f.h.state.AdvertisedServicesMatter() {
+	if !f.h.state.AdvertisedServicesMatter() || f.h.mapBatcher == nil || !f.h.mapBatcher.IsConnected(nodeID) {
+		f.mu.Unlock()
+
 		return
 	}
-
-	if f.h.mapBatcher == nil || !f.h.mapBatcher.IsConnected(nodeID) {
-		return
-	}
-
-	f.mu.Lock()
 
 	if b, ok := f.backoff[nodeID]; ok {
-		switch {
-		case b.hash != want:
-			delete(f.backoff, nodeID)
-		case time.Now().Before(b.retryAt):
+		if b.hash == want && time.Now().Before(b.retryAt) {
 			f.mu.Unlock()
 
 			return
+		}
+
+		if b.hash != want {
+			if b.retry != nil {
+				b.retry.Stop()
+			}
+
+			delete(f.backoff, nodeID)
 		}
 	}
 
@@ -180,6 +271,21 @@ func (f *servicesFetcher) sync(nodeID types.NodeID) {
 		// Tailscale clients always answer c2n over Noise; say so anyway.
 		URLIsNoise: true,
 	}))
+}
+
+// store applies a list for hash and dispatches the resulting DNS change.
+// A list for a hash the node has moved past is dropped.
+func (f *servicesFetcher) store(nodeID types.NodeID, hash string, services []string) {
+	c, err := f.h.state.SetNodeAdvertisedServices(nodeID, hash, services)
+
+	switch {
+	case errors.Is(err, state.ErrServicesHashMoved):
+		log.Debug().Uint64(zf.NodeID, nodeID.Uint64()).Msg("dropping advertised services for an older services hash")
+	case err != nil:
+		log.Debug().Err(err).Uint64(zf.NodeID, nodeID.Uint64()).Msg("storing advertised services")
+	case !c.IsEmpty():
+		f.h.Change(c)
+	}
 }
 
 // callbackURL returns the URL the node posts its c2n response to. The
@@ -225,21 +331,36 @@ func (f *servicesFetcher) take(id string) (*servicesFetch, bool) {
 	return fetch, true
 }
 
-// expire drops an unanswered fetch and schedules another: a fetch can be
-// lost when the node reconnects, or when another ping to the node is merged
-// into the same map response. The wait doubles for each unanswered fetch of
-// the same hash, up to servicesRetryMax, so a node that never answers costs
-// little.
+// expire handles a fetch that got no answer in time. A fetch can be lost
+// when the node reconnects, or when another ping to the node is merged into
+// the same map response.
 func (f *servicesFetcher) expire(id string) {
 	fetch, ok := f.take(id)
 	if !ok {
 		return
 	}
 
+	f.failed(fetch, "no answer")
+}
+
+// failed schedules the next fetch for the node after a doubling wait, up
+// to servicesRetryMax, so a node that never answers costs little, and stops
+// the node's older list from claiming while the current one is unknown.
+func (f *servicesFetcher) failed(fetch *servicesFetch, reason string) {
 	f.mu.Lock()
+
+	if f.closed {
+		f.mu.Unlock()
+
+		return
+	}
 
 	b, ok := f.backoff[fetch.nodeID]
 	if !ok || b.hash != fetch.hash {
+		if ok && b.retry != nil {
+			b.retry.Stop()
+		}
+
 		b = &fetchBackoff{hash: fetch.hash}
 		f.backoff[fetch.nodeID] = b
 	}
@@ -248,18 +369,28 @@ func (f *servicesFetcher) expire(id string) {
 	b.failures++
 	b.retryAt = time.Now().Add(delay)
 
+	if b.retry != nil {
+		b.retry.Stop()
+	}
+
+	b.retry = time.AfterFunc(delay, func() { f.sync(fetch.nodeID) })
+
 	f.mu.Unlock()
 
 	log.Debug().
 		Uint64(zf.NodeID, fetch.nodeID.Uint64()).
+		Str("reason", reason).
 		Dur("retry_in", delay).
-		Msg("c2n services fetch timed out")
+		Msg("c2n services fetch failed")
 
-	time.AfterFunc(delay, func() { f.sync(fetch.nodeID) })
+	c, err := f.h.state.WithdrawStaleAdvertisedServices(fetch.nodeID)
+	if err == nil && !c.IsEmpty() {
+		f.h.Change(c)
+	}
 }
 
 // retryDelay is the wait before the next fetch after failures earlier
-// unanswered fetches: servicesFetchTimeout doubled per failure, capped.
+// failed fetches: servicesFetchTimeout doubled per failure, capped.
 func retryDelay(failures int) time.Duration {
 	delay := servicesFetchTimeout
 	for range failures {
@@ -272,7 +403,7 @@ func retryDelay(failures int) time.Duration {
 	return delay
 }
 
-// complete stores the services from a node's c2n response.
+// complete handles a node's c2n response for the fetch with the given ID.
 func (f *servicesFetcher) complete(id string, machineKey key.MachinePublic, body *bufio.Reader) error {
 	pending, ok := f.lookup(id)
 	if !ok {
@@ -291,25 +422,58 @@ func (f *servicesFetcher) complete(id string, machineKey key.MachinePublic, body
 		return errUnknownC2NRequest
 	}
 
+	active, err := parseVIPServicesResponse(body)
+	if err != nil {
+		f.failed(fetch, err.Error())
+
+		return err
+	}
+
 	f.mu.Lock()
-	delete(f.backoff, fetch.nodeID)
+	if b, ok := f.backoff[fetch.nodeID]; ok && b.hash == fetch.hash {
+		if b.retry != nil {
+			b.retry.Stop()
+		}
+
+		delete(f.backoff, fetch.nodeID)
+	}
 	f.mu.Unlock()
 
+	// Store the list under the Hostinfo hash the fetch was made for, not
+	// the hash in the response: when the two disagree, comparing against
+	// the response hash would refetch at once, and forever.
+	f.store(fetch.nodeID, fetch.hash, active)
+
+	log.Debug().
+		Uint64(zf.NodeID, fetch.nodeID.Uint64()).
+		Strs("services", active).
+		Msg("received advertised services over c2n")
+
+	// The node may have changed its services again while this fetch was
+	// in flight.
+	f.sync(fetch.nodeID)
+
+	return nil
+}
+
+// parseVIPServicesResponse reads the serialised HTTP response of a node to
+// GET /vip-services and returns the names of its active services.
+func parseVIPServicesResponse(body *bufio.Reader) ([]string, error) {
 	resp, err := http.ReadResponse(body, nil)
 	if err != nil {
-		return fmt.Errorf("reading c2n response: %w", err)
+		return nil, fmt.Errorf("reading c2n response: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: status %d", errC2NStatus, resp.StatusCode)
+		return nil, fmt.Errorf("%w: status %d", errC2NStatus, resp.StatusCode)
 	}
 
 	var res tailcfg.C2NVIPServicesResponse
 
 	err = json.NewDecoder(resp.Body).Decode(&res)
 	if err != nil {
-		return fmt.Errorf("decoding c2n vip-services response: %w", err)
+		return nil, fmt.Errorf("decoding c2n vip-services response: %w", err)
 	}
 
 	var active []string
@@ -322,28 +486,7 @@ func (f *servicesFetcher) complete(id string, machineKey key.MachinePublic, body
 		active = append(active, svc.Name.String())
 	}
 
-	// Store the list under the Hostinfo hash the fetch was made for, not
-	// the hash in the response: when the two disagree, comparing against
-	// the response hash would refetch at once, and forever.
-	c, err := f.h.state.SetNodeAdvertisedServices(fetch.nodeID, fetch.hash, active)
-	if err != nil {
-		return err
-	}
-
-	log.Debug().
-		Uint64(zf.NodeID, fetch.nodeID.Uint64()).
-		Strs("services", active).
-		Msg("stored advertised services from c2n")
-
-	if !c.IsEmpty() {
-		f.h.Change(c)
-	}
-
-	// The node may have changed its services again while this fetch was
-	// in flight.
-	f.sync(fetch.nodeID)
-
-	return nil
+	return active, nil
 }
 
 // C2NResponseHandler receives a node's answer to a c2n [tailcfg.PingRequest]:
