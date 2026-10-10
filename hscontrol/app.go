@@ -897,6 +897,7 @@ func (h *Headscale) Serve() error {
 
 				scheduleCancel()
 				h.ephemeralGC.Close()
+				h.servicesFetcher.stop()
 
 				// Gracefully shut down servers
 				shutdownCtx, cancel := context.WithTimeout(
