@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	stdlog "log"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/go-chi/metrics"
 	"github.com/juanfont/headscale/hscontrol/capver"
 	"github.com/juanfont/headscale/hscontrol/types"
+	"github.com/juanfont/headscale/hscontrol/util/zlog/zf"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/net/http2"
@@ -76,10 +78,8 @@ const (
 type noiseServer struct {
 	headscale *Headscale
 
-	httpBaseConfig *http.Server
-	http2Server    *http2.Server
-	conn           *controlbase.Conn
-	machineKey     key.MachinePublic
+	conn       *controlbase.Conn
+	machineKey key.MachinePublic
 
 	// [tailcfg.EarlyNoise]-related stuff
 	challenge       key.ChallengePrivate
@@ -206,39 +206,44 @@ func (h *Headscale) NoiseUpgradeHandler(
 		r.Post("/c2n", ns.NotImplementedHandler)
 	})
 
-	ns.httpBaseConfig = &http.Server{
-		Handler:           r,
+	serveNoiseHTTP2(noiseConn, r, h.cfg.Noise)
+}
+
+// serveNoiseHTTP2 serves HTTP/2 on an accepted Noise connection until it
+// closes, with the PING health check of cfg, and with the server's messages
+// and error counts going to Headscale's logger and metrics.
+func serveNoiseHTTP2(conn net.Conn, handler http.Handler, cfg types.NoiseConfig) {
+	base := &http.Server{
+		Handler:           handler,
 		ReadHeaderTimeout: types.HTTPTimeout,
-		HTTP2:             noiseHTTP2Config(h.cfg.Noise),
+		HTTP2:             noiseHTTP2Config(cfg),
 		ErrorLog:          noiseHTTP2ErrorLog,
 	}
-	ns.http2Server = &http2.Server{
+
+	h2 := &http2.Server{
 		CountError: func(errType string) {
 			noiseHTTP2Errors.WithLabelValues(errType).Inc()
 		},
 	}
 
-	ns.http2Server.ServeConn(
-		noiseConn,
-		&http2.ServeConnOpts{
-			BaseConfig: ns.httpBaseConfig,
-		},
-	)
+	h2.ServeConn(conn, &http2.ServeConnOpts{BaseConfig: base})
 }
 
 // noiseHTTP2ErrorLog sends the messages of the HTTP/2 server on Noise
 // connections, such as "timeout waiting for PING response" when it closes a
 // connection whose node stopped answering, to Headscale's logger instead of
-// the standard library's default logger.
-var noiseHTTP2ErrorLog = stdlog.New(zerologInfoWriter{component: "noise-http2"}, "", 0)
+// the standard library's default logger. The server only writes errors
+// there, so they are warnings: an operator who logs at warn still sees a
+// node found lost.
+var noiseHTTP2ErrorLog = stdlog.New(zerologWarnWriter{component: "noise-http2"}, "", 0)
 
-// zerologInfoWriter writes each line it gets as an info message.
-type zerologInfoWriter struct {
+// zerologWarnWriter writes each line it gets as a warning.
+type zerologWarnWriter struct {
 	component string
 }
 
-func (w zerologInfoWriter) Write(p []byte) (int, error) {
-	log.Info().Str("component", w.component).Msg(strings.TrimSpace(string(p)))
+func (w zerologWarnWriter) Write(p []byte) (int, error) {
+	log.Warn().Str(zf.Component, w.component).Msg(strings.TrimSpace(string(p)))
 
 	return len(p), nil
 }
