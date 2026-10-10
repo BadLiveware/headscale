@@ -1,6 +1,7 @@
 package v2
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/juanfont/headscale/hscontrol/types"
@@ -184,4 +185,47 @@ func TestServiceHostnamesFollowPolicyReload(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Empty(t, pm.ServiceHostnames(gw, []string{"svc:gitea"}))
+}
+
+// A label added to a long zone can make a name longer than DNS allows;
+// such a name must not be claimed.
+func TestServiceHostnamesSkipsTooLongNames(t *testing.T) {
+	users := types.Users{{ID: 1, Name: "user"}}
+	label := strings.Repeat("a", 61)
+	zone := strings.Join([]string{label, label, label, label}, ".") // 247 bytes, valid on its own
+
+	pm, err := NewPolicyManager([]byte(`{
+		"tagOwners": {"tag:gateway": ["user@"]},
+		"hostnameClaims": {"*.`+zone+`": ["tag:gateway"]}
+	}`), users, views.SliceOf([]types.NodeView{}))
+	require.NoError(t, err)
+
+	gw := (&types.Node{ID: 1, Tags: []string{"tag:gateway"}, IPv4: ap("100.64.0.1")}).View()
+
+	assert.Equal(t, []string{"a." + zone}, pm.ServiceHostnames(gw, []string{"svc:a", "svc:grafana"}),
+		"grafana.<zone> is 255 bytes, over the 253-byte limit")
+}
+
+// The errors of several invalid entries come in the same order every time.
+func TestHostnameClaimsErrorOrderIsStable(t *testing.T) {
+	pol := []byte(`{
+		"tagOwners": {"tag:gateway": ["user@"]},
+		"hostnameClaims": {
+			"zzz": ["tag:gateway"],
+			"aaa": ["tag:gateway"],
+			"mmm": ["tag:gateway"]
+		}
+	}`)
+
+	_, first := unmarshalPolicy(pol)
+	require.Error(t, first)
+
+	for range 20 {
+		_, err := unmarshalPolicy(pol)
+		require.Error(t, err)
+		require.Equal(t, first.Error(), err.Error())
+	}
+
+	assert.Less(t, strings.Index(first.Error(), `"aaa"`), strings.Index(first.Error(), `"mmm"`))
+	assert.Less(t, strings.Index(first.Error(), `"mmm"`), strings.Index(first.Error(), `"zzz"`))
 }

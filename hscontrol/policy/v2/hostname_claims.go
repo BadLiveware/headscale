@@ -3,6 +3,7 @@ package v2
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -74,7 +75,10 @@ func (p *Policy) compileHostnameClaims() ([]hostnameClaimRule, []error) {
 		errs  []error
 	)
 
-	for pattern, tags := range p.HostnameClaims {
+	// Sorted, so the reported errors come in the same order on every load.
+	for _, pattern := range slices.Sorted(maps.Keys(p.HostnameClaims)) {
+		tags := p.HostnameClaims[pattern]
+
 		label, zone, err := parseHostnameClaimPattern(pattern)
 		if err != nil {
 			errs = append(errs, err)
@@ -125,7 +129,13 @@ func serviceHostnames(rules []hostnameClaimRule, nodeTags []string, services []s
 				continue
 			}
 
-			names = append(names, label+"."+rule.zone)
+			// A long label on a long zone can exceed the DNS name limits.
+			name := label + "." + rule.zone
+			if dnsname.ValidHostname(name) != nil {
+				continue
+			}
+
+			names = append(names, name)
 		}
 	}
 

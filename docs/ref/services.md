@@ -44,6 +44,8 @@ Only tagged nodes host services.
 - If the address pool has no room, the service gets no VIPs: nobody can reach it, Headscale logs an error and counts it
   in the `headscale_service_vip_allocation_failures_total` metric, and tries again on the next policy change or
   restart.
+- Headscale allocates the VIPs only once the policy is stored, so a policy `tests` entry can check a service only after
+  the service exists: add the service first, then the tests that use it.
 - `svc:<label>` is a destination for grants and ACLs (`"svc:grafana:443"` in an ACL).
   It cannot be a source, an SSH destination or a `nodeAttrs` target.
 - A wildcard destination (`"*"`, as in an allow-all policy) contains every VIP: it lets its sources reach every service.
@@ -109,8 +111,9 @@ Headscale puts the VIPs on exactly one host in each client's network map:
   A drain takes effect within about a second; a clean stop after about 10 seconds, when Headscale marks the host offline.
   Other clients do not change.
 - When a host starts to host the service, it takes no clients at once.
-  A rebalance then moves clients to it gradually, at most `services.rebalance.moves_per_host_per_minute` clients from each
-  other host per minute, until every host is within `services.rebalance.tolerance` of its preferred share.
+  A rebalance then moves clients to it gradually, on average at most `services.rebalance.moves_per_host_per_minute`
+  clients per minute from each other host (counted across all services the host serves), until every host is within
+  `services.rebalance.tolerance` of its preferred share.
 - Headscale keeps the assignments in memory.
   For `services.startup_grace` after Headscale starts, clients follow their preferred host at once, so the hosts that
   reconnect one after another after a restart share the clients instead of the first host keeping all of them.
@@ -125,7 +128,8 @@ services:
     tolerance: 0.1
 ```
 
-With the defaults, a host loses at most one client to the rebalance every 5 seconds.
+With the defaults, a host loses at most two clients to the rebalance in each 10-second round, 12 per minute on average.
+The rate is an average: a longer interval moves proportionally more clients in one round.
 For example, with 1200 clients on 3 hosts, a fourth host has a preferred share of about 300 clients.
 The rebalance moves about 267 of them in about 7 to 8 minutes, and then stops: every host is within the 10 % tolerance of
 its share, so the last clients keep their host instead of having their connections reset.

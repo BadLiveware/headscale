@@ -129,7 +129,7 @@ func TestPlanRebalanceAfterJoin(t *testing.T) {
 	rounds, total := 0, 0
 
 	for ; rounds < testViewers; rounds++ {
-		moves := planRebalance(clientsNow(), func(types.NodeID) int { return perHost }, tolerance)
+		moves := planRebalance(clientsNow(), budgetOf(three, perHost), tolerance)
 		if len(moves) == 0 {
 			break
 		}
@@ -174,8 +174,8 @@ func TestPlanRebalanceNothingWithinTolerance(t *testing.T) {
 		{viewer: 3, from: 11, to: 11},
 	}
 
-	assert.Empty(t, planRebalance(clients, func(types.NodeID) int { return 5 }, 0.5), "a spread within tolerance moves nobody")
-	assert.Len(t, planRebalance(clients, func(types.NodeID) int { return 5 }, 0), 1, "with no tolerance the client moves to its target")
+	assert.Empty(t, planRebalance(clients, map[types.NodeID]int{10: 5, 11: 5}, 0.5), "a spread within tolerance moves nobody")
+	assert.Len(t, planRebalance(clients, map[types.NodeID]int{10: 5, 11: 5}, 0), 1, "with no tolerance the client moves to its target")
 }
 
 func TestRebalanceBudgetKeepsRate(t *testing.T) {
@@ -201,7 +201,7 @@ func TestRebalanceBudgetKeepsRate(t *testing.T) {
 		moves := 0
 
 		for range tt.rounds {
-			n := sv.rebalanceBudget(cfg, hosts)(testFirstHost)
+			n := sv.rebalanceBudget(cfg, hosts)[testFirstHost]
 			sv.credit[testFirstHost] -= float64(n)
 			moves += n
 		}
@@ -217,7 +217,39 @@ func TestRebalanceBudgetKeepsRate(t *testing.T) {
 		sv.rebalanceBudget(cfg, hosts)
 	}
 
-	assert.Equal(t, 2, sv.rebalanceBudget(cfg, hosts)(testFirstHost), "no burst after idle rounds")
+	assert.Equal(t, 2, sv.rebalanceBudget(cfg, hosts)[testFirstHost], "no burst after idle rounds")
+}
+
+// TestPlanRebalanceSharesBudgetAcrossServices checks that a host serving
+// two services gives up at most its budget in one round in total, not per
+// service.
+func TestPlanRebalanceSharesBudgetAcrossServices(t *testing.T) {
+	const budget = 2
+
+	busy, idle := types.NodeID(10), types.NodeID(11)
+
+	clients := make([]serviceClient, 0, 10)
+	for v := range types.NodeID(10) {
+		clients = append(clients, serviceClient{viewer: v + 100, from: busy, to: idle})
+	}
+
+	remaining := map[types.NodeID]int{busy: budget, idle: budget}
+
+	first := planRebalance(clients, remaining, 0)
+	second := planRebalance(clients, remaining, 0)
+
+	assert.Len(t, first, budget)
+	assert.Empty(t, second, "the second service finds the host's budget used up")
+}
+
+// budgetOf gives each host the same number of moves for one round.
+func budgetOf(hosts []types.NodeID, n int) map[types.NodeID]int {
+	m := make(map[types.NodeID]int, len(hosts))
+	for _, h := range hosts {
+		m[h] = n
+	}
+
+	return m
 }
 
 // sees returns a visibility function over sorted peers.
@@ -238,4 +270,44 @@ func TestRefreshLetsRebalanceLookAgain(t *testing.T) {
 	s.refreshServiceHostsLocked()
 
 	assert.Nil(t, s.services.balanced)
+}
+
+// TestOfflineAssignmentDroppedWhenHostLeaves checks that an offline
+// client's sticky host is forgotten once that host leaves, so the client
+// gets its rendezvous choice even if the old host is back before it.
+func TestOfflineAssignmentDroppedWhenHostLeaves(t *testing.T) {
+	s := benchServiceState(t, 30)
+
+	const viewer = types.NodeID(10)
+
+	idx := s.services.index.Load()
+	target, ok := idx.hostFor(viewer, benchService)
+	require.True(t, ok)
+
+	var other types.NodeID
+
+	for _, h := range idx.hosts[benchService] {
+		if h != target {
+			other = h
+
+			break
+		}
+	}
+
+	sticky := *idx
+	sticky.assigned = map[tailcfg.ServiceName]map[types.NodeID]types.NodeID{}
+	sticky.assign(benchService, viewer, other)
+	s.services.index.Store(&sticky)
+
+	s.nodeStore.UpdateNode(viewer, func(n *types.Node) { n.IsOnline = new(false) })
+
+	s.nodeStore.UpdateNode(other, func(n *types.Node) { n.AdvertisedServices = nil })
+	s.refreshServiceHostsLocked()
+
+	s.nodeStore.UpdateNode(other, func(n *types.Node) { n.AdvertisedServices = []string{benchService.String()} })
+	s.refreshServiceHostsLocked()
+
+	got, ok := s.services.index.Load().hostFor(viewer, benchService)
+	require.True(t, ok)
+	assert.Equal(t, target, got, "the viewer's old host left; it gets its rendezvous choice")
 }

@@ -227,8 +227,10 @@ services:
     # the rebalance: clients then only move when their host leaves.
     interval: 10s
 
-    # At most this many clients are taken from one host per minute; each move
-    # resets one client's connections to that host.
+    # Average number of clients taken from one host per minute, across all
+    # services it hosts; each move resets one client's connections to that
+    # host. A round moves up to moves_per_host_per_minute × interval clients,
+    # so a longer interval allows proportionally larger batches.
     moves_per_host_per_minute: 12
 
     # Stop moving clients when every host is within this fraction of its

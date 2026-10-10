@@ -80,6 +80,11 @@ type services struct {
 	// move in; the next rounds skip it until a refresh stores a new one.
 	balanced *serviceHostIndex
 
+	// policySynced reports whether the policy manager holds the VIPs in
+	// vips; a failed SetServiceVIPs leaves it false, so the next load
+	// retries. Guarded by mu.
+	policySynced bool
+
 	// credit is the fractional rebalance budget per host, see
 	// [services.rebalanceBudget]. Guarded by mu.
 	credit map[types.NodeID]float64
@@ -118,6 +123,9 @@ func (s *State) loadServiceVIPs() (bool, error) {
 		for i := range stored {
 			vips[stored[i].ServiceName()] = stored[i].VIPs()
 		}
+
+		// The policy manager starts without VIPs.
+		s.services.policySynced = len(vips) == 0
 	} else {
 		vips = maps.Clone(*s.services.vips.Load())
 	}
@@ -152,13 +160,16 @@ func (s *State) loadServiceVIPs() (bool, error) {
 	s.services.vips.Store(&vips)
 
 	// The policy manager keeps the VIPs across policy changes; it only
-	// needs them again when they changed. Without any service this costs
-	// nothing.
-	if created == 0 && (!first || len(vips) == 0) {
+	// needs them again when they changed, or when giving them failed
+	// before. Without any service this costs nothing.
+	if created == 0 && s.services.policySynced {
 		return false, nil
 	}
 
-	return s.polMan.SetServiceVIPs(vips)
+	changed, err := s.polMan.SetServiceVIPs(vips)
+	s.services.policySynced = err == nil
+
+	return changed, err
 }
 
 // HasServiceVIPs reports whether any service has VIPs.
@@ -312,8 +323,10 @@ func (s *State) refreshServiceHostsLocked() bool {
 	s.services.mu.Lock()
 	defer s.services.mu.Unlock()
 
+	// Without any service there is nothing to refresh; this runs on every
+	// node event.
 	vips := s.services.vips.Load()
-	if vips == nil {
+	if vips == nil || len(*vips) == 0 {
 		return false
 	}
 
@@ -416,14 +429,19 @@ func (s *State) refreshServiceHostsLocked() bool {
 }
 
 // keepOfflineAssignments carries an offline viewer's sticky hosts into
-// next, so it keeps them when it reconnects.
+// next, so it keeps them when it reconnects, while they stay active.
 func (s *State) keepOfflineAssignments(prev, next *serviceHostIndex, viewer types.NodeID) {
 	if prev == nil {
 		return
 	}
 
+	visible := next.visibleTo(viewer)
+
 	for name, viewers := range prev.assigned {
-		if h, ok := viewers[viewer]; ok {
+		// Keep it only while the host stays active and visible: once the
+		// host leaves, the viewer's next host is its rendezvous choice,
+		// also if the old host comes back before the viewer.
+		if h, ok := viewers[viewer]; ok && slices.Contains(next.hosts[name], h) && visible(h) {
 			next.assign(name, viewer, h)
 		}
 	}
@@ -636,15 +654,11 @@ func (s *State) warnServiceNameOnce(svc tailcfg.ServiceName) {
 }
 
 // serviceAccessFunc returns a function that reports whether the policy lets
-// viewer reach a service, that is, any of its VIPs.
+// viewer reach a service, that is, any of its VIPs, see
+// [State.mayReachService]. It caches the answer per service.
 func (s *State) serviceAccessFunc(viewer types.NodeID) func(tailcfg.ServiceName) bool {
 	node, ok := s.nodeStore.GetNode(viewer)
 	if !ok {
-		return func(tailcfg.ServiceName) bool { return false }
-	}
-
-	matchers, err := s.polMan.MatchersForNode(node)
-	if err != nil {
 		return func(tailcfg.ServiceName) bool { return false }
 	}
 
@@ -655,12 +669,7 @@ func (s *State) serviceAccessFunc(viewer types.NodeID) func(tailcfg.ServiceName)
 			return v
 		}
 
-		var prefixes []netip.Prefix
-		for _, addr := range s.ServiceVIPs(svc) {
-			prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
-		}
-
-		v := len(policy.ReduceRoutes(node, prefixes, matchers)) > 0
+		v := s.mayReachService(node, svc)
 		cache[svc] = v
 
 		return v

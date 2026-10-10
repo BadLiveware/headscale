@@ -653,6 +653,11 @@ func (pm *PolicyManager) SetPolicy(polB []byte) (bool, error) {
 	// Aggregate ACL and SSH test failures via multierr so operators
 	// see both classes in a single response instead of having to
 	// fix-and-retry to discover the second one.
+	//
+	// The candidate gets the current service VIPs, so tests with svc:
+	// destinations resolve them.
+	pol.serviceVIPs = pm.serviceVIPs
+
 	testErr := multierr.New(
 		evaluateTests(pol, pm.users, pm.nodes),
 		evaluateSSHTests(pol, pm.users, pm.nodes),

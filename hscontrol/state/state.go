@@ -306,6 +306,9 @@ func NewState(cfg *types.Config) (*State, error) {
 
 	_, err = s.loadServiceVIPs()
 	if err != nil {
+		// Stop the NodeStore and close the database opened above.
+		_ = s.Close()
+
 		return nil, fmt.Errorf("loading service addresses: %w", err)
 	}
 
@@ -981,6 +984,10 @@ func (s *State) SetNodeExpiry(nodeID types.NodeID, expiry *time.Time) (types.Nod
 		recompute = change.PolicyChange()
 	}
 
+	// The NodeStore holds the new online state, so the claims follow it
+	// on every return below, the failed database writes included.
+	recompute = recompute.Merge(s.refreshHostnameClaims())
+
 	// Persist expiry change to database directly since persistNodeAndRefreshPolicy omits expiry.
 	err := s.db.NodeSetExpiry(nodeID, expiry)
 	if err != nil {
@@ -997,7 +1004,7 @@ func (s *State) SetNodeExpiry(nodeID types.NodeID, expiry *time.Time) (types.Nod
 
 	// Resolve expiry and online status together from the current snapshot
 	// when the mapper sends the change, including after a rapid restoration.
-	c = c.Merge(change.NodeAdded(n.ID())).Merge(recompute).Merge(s.refreshHostnameClaims())
+	c = c.Merge(change.NodeAdded(n.ID())).Merge(recompute)
 
 	return n, c, nil
 }
@@ -1346,12 +1353,9 @@ func (s *State) SetPolicy(pol []byte) (bool, error) {
 		return changed, err
 	}
 
-	servicesChanged, err := s.loadServiceVIPs()
-	if err != nil {
-		log.Error().Err(err).Msg("loading service addresses after a policy change")
-	}
-
-	changed = changed || servicesChanged
+	// No VIPs are allocated here: the API calls SetPolicy to check a
+	// policy before it stores it, and a rejected policy must not use up
+	// addresses. ReloadPolicy allocates once the policy is stored.
 
 	// Clear SSH check auth times when policy changes.
 	s.ClearSSHCheckAuth()
