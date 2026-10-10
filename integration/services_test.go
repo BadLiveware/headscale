@@ -209,16 +209,21 @@ func TestServiceVIPs(t *testing.T) {
 
 	// servedBy waits until client reaches the service over both VIPs and,
 	// for HEAD clients, over its name, at one host in want. It returns the
-	// host and when the wait ended.
+	// host and when the wait ended. Each attempt is one container call.
 	servedBy := func(c TailscaleClient, want []string, timeout time.Duration, msg string) (string, time.Time) {
 		t.Helper()
+
+		urls := []string{urlOf(vips[0]), urlOf(vips[1])}
+		if c.Version() == tsic.VersionHead {
+			urls = append(urls, fmt.Sprintf("http://%s/", serviceFQDN))
+		}
 
 		var host string
 
 		assert.EventuallyWithT(t, func(ct *assert.CollectT) {
-			got := []string{fetch(c, urlOf(vips[0])), fetch(c, urlOf(vips[1]))}
-			if c.Version() == tsic.VersionHead {
-				got = append(got, fetch(c, fmt.Sprintf("http://%s/", serviceFQDN)))
+			got := fetchServiceBodies(c, urls...)
+			if !assert.Lenf(ct, got, len(urls), "%s: one answer per address", c.Hostname()) {
+				return
 			}
 
 			host = got[0]
@@ -286,7 +291,8 @@ func TestServiceVIPs(t *testing.T) {
 	// The outsider has no grant: no VIP route, no name, no answer.
 	assert.Empty(t, fetch(outsider, urlOf(vips[0])), "outsider cannot reach the VIP")
 
-	stdout, _, _ := outsider.Execute([]string{"tailscale", "dns", "status", "--json"})
+	stdout, _, err := outsider.Execute([]string{"tailscale", "dns", "status", "--json"})
+	require.NoError(t, err)
 	assert.NotContains(t, stdout, serviceFQDN, "outsider does not get the service name")
 
 	// Drain the gateway with the most clients.
@@ -342,4 +348,22 @@ func TestServiceVIPs(t *testing.T) {
 	}
 
 	t.Logf("stop: every client served by %s within %s", other.Hostname(), worstStop)
+}
+
+// fetchServiceBodies fetches every url in one container call and returns
+// the bodies in order, "" for a failed request. Each body is framed by "<"
+// and ">" so an empty or failed answer keeps its place. Busybox sh and
+// wget are in every client image.
+func fetchServiceBodies(c TailscaleClient, urls ...string) []string {
+	script := `for u in "$@"; do printf '<'; wget -q -T 2 -O - "$u" 2>/dev/null; printf '>\n'; done`
+
+	stdout, _, _ := c.Execute(append([]string{"sh", "-c", script, "fetch"}, urls...))
+
+	bodies := make([]string, 0, len(urls))
+
+	for line := range strings.SplitSeq(strings.TrimSpace(stdout), "\n") {
+		bodies = append(bodies, strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "<"), ">")))
+	}
+
+	return bodies
 }

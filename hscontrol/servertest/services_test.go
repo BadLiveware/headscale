@@ -316,8 +316,10 @@ func TestServiceVIPsForClaimedNames(t *testing.T) {
 
 	require.Equal(t, vips, srv.State().ServiceVIPs(serviceName), "a restored service gets its old VIPs")
 
-	viewer.WaitForCondition(t, "the restored service is reachable again", serviceWait,
-		func(nm *netmap.NetworkMap) bool { return carrier(nm, vips) == "gw" })
+	viewer.WaitForCondition(t, "the restored service is reachable and resolvable again", serviceWait,
+		func(nm *netmap.NetworkMap) bool {
+			return carrier(nm, vips) == "gw" && slices.Equal(serviceRecords(nm), sorted(vips))
+		})
 }
 
 // lastHostSetup starts a server with one active host of svc:grafana and a
