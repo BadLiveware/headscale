@@ -314,6 +314,7 @@ jobs:
           - TestPingAllByIPManyUpDown
           - TestNodeDeletionEndsLongPoll
           - Test2118DeletingOnlineNodePanics
+          - TestNoisePingFindsCutNode
           - TestGrantCapRelay
           - TestGrantCapDrive
           - TestK8sOperator
