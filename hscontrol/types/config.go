@@ -656,46 +656,9 @@ func validateServerConfigInto(v *configValidator) {
 		})
 	}
 
-	if (viper.GetString("tls_letsencrypt_hostname") != "") &&
-		((viper.GetString("tls_cert_path") != "") || (viper.GetString("tls_key_path") != "")) {
-		v.Add(&ConfigError{
-			Reason:  "tls_letsencrypt_hostname and tls_cert_path/tls_key_path are mutually exclusive",
-			Current: []KV{{"tls_letsencrypt_hostname", viper.GetString("tls_letsencrypt_hostname")}},
-			ConflictsWith: []KV{
-				{"tls_cert_path", viper.GetString("tls_cert_path")},
-				{"tls_key_path", viper.GetString("tls_key_path")},
-			},
-			Hint: "choose one TLS strategy and unset the other (Let's Encrypt OR a static keypair)",
-			See:  "https://headscale.net/stable/ref/tls/",
-		})
-	}
-
-	if viper.GetString("noise.private_key_path") == "" {
-		v.Add(&ConfigError{
-			Reason: "noise.private_key_path is required",
-			Hint:   "set noise.private_key_path: /var/lib/headscale/noise_private.key (or any writable path)",
-			See:    "https://headscale.net/stable/setup/install/official/",
-		})
-	}
-
-	if (viper.GetString("tls_letsencrypt_hostname") != "") &&
-		(viper.GetString("tls_letsencrypt_challenge_type") == TLSALPN01ChallengeType) &&
-		(!strings.HasSuffix(viper.GetString("listen_addr"), ":443")) {
-		// this is only a warning because there could be something sitting in front of headscale that redirects the traffic (e.g. an iptables rule)
-		log.Warn().
-			Msg("Warning: when using tls_letsencrypt_hostname with TLS-ALPN-01 as challenge type, headscale must be reachable on port 443, i.e. listen_addr should probably end in :443")
-	}
-
+	validateTLSConfig(v)
+	validateNoiseConfig(v)
 	validateListenerCollisions(v)
-
-	if ct := viper.GetString("tls_letsencrypt_challenge_type"); ct != HTTP01ChallengeType && ct != TLSALPN01ChallengeType {
-		v.Add(&ConfigError{
-			Reason:  "tls_letsencrypt_challenge_type has an unsupported value",
-			Current: []KV{{"tls_letsencrypt_challenge_type", ct}},
-			Allowed: []string{HTTP01ChallengeType, TLSALPN01ChallengeType},
-			Hint:    "pick one of the allowed values; HTTP-01 is the default",
-		})
-	}
 
 	serverURL := viper.GetString("server_url")
 	if !strings.HasPrefix(serverURL, "http://") && !strings.HasPrefix(serverURL, "https://") {
@@ -734,7 +697,61 @@ func validateServerConfigInto(v *configValidator) {
 		}
 	}
 
-	// Validate Noise connection health check parameters
+	validateHAProbeConfig(v)
+	validateTuningConfig(v)
+	validateDERPConfig(v)
+	validateDatabaseConfig(v)
+	validateMagicDNSConfig(v)
+
+	depr.Apply(v)
+}
+
+// validateTLSConfig
+// records ConfigErrors for conflicting or unsupported TLS settings.
+func validateTLSConfig(v *configValidator) {
+	if (viper.GetString("tls_letsencrypt_hostname") != "") &&
+		((viper.GetString("tls_cert_path") != "") || (viper.GetString("tls_key_path") != "")) {
+		v.Add(&ConfigError{
+			Reason:  "tls_letsencrypt_hostname and tls_cert_path/tls_key_path are mutually exclusive",
+			Current: []KV{{"tls_letsencrypt_hostname", viper.GetString("tls_letsencrypt_hostname")}},
+			ConflictsWith: []KV{
+				{"tls_cert_path", viper.GetString("tls_cert_path")},
+				{"tls_key_path", viper.GetString("tls_key_path")},
+			},
+			Hint: "choose one TLS strategy and unset the other (Let's Encrypt OR a static keypair)",
+			See:  "https://headscale.net/stable/ref/tls/",
+		})
+	}
+
+	if (viper.GetString("tls_letsencrypt_hostname") != "") &&
+		(viper.GetString("tls_letsencrypt_challenge_type") == TLSALPN01ChallengeType) &&
+		(!strings.HasSuffix(viper.GetString("listen_addr"), ":443")) {
+		// this is only a warning because there could be something sitting in front of headscale that redirects the traffic (e.g. an iptables rule)
+		log.Warn().
+			Msg("Warning: when using tls_letsencrypt_hostname with TLS-ALPN-01 as challenge type, headscale must be reachable on port 443, i.e. listen_addr should probably end in :443")
+	}
+
+	if ct := viper.GetString("tls_letsencrypt_challenge_type"); ct != HTTP01ChallengeType && ct != TLSALPN01ChallengeType {
+		v.Add(&ConfigError{
+			Reason:  "tls_letsencrypt_challenge_type has an unsupported value",
+			Current: []KV{{"tls_letsencrypt_challenge_type", ct}},
+			Allowed: []string{HTTP01ChallengeType, TLSALPN01ChallengeType},
+			Hint:    "pick one of the allowed values; HTTP-01 is the default",
+		})
+	}
+}
+
+// validateNoiseConfig
+// records ConfigErrors for the Noise key path and the Noise connection health check.
+func validateNoiseConfig(v *configValidator) {
+	if viper.GetString("noise.private_key_path") == "" {
+		v.Add(&ConfigError{
+			Reason: "noise.private_key_path is required",
+			Hint:   "set noise.private_key_path: /var/lib/headscale/noise_private.key (or any writable path)",
+			See:    "https://headscale.net/stable/setup/install/official/",
+		})
+	}
+
 	for _, k := range []string{"noise.ping_after_idle", "noise.ping_timeout"} {
 		// viper.GetDuration reads a malformed duration as 0, which would
 		// silently disable the check.
@@ -779,8 +796,11 @@ func validateServerConfigInto(v *configValidator) {
 			})
 		}
 	}
+}
 
-	// Validate HA health probing parameters
+// validateHAProbeConfig
+// records ConfigErrors for the HA route health probing intervals.
+func validateHAProbeConfig(v *configValidator) {
 	if haInterval := viper.GetDuration("node.routes.ha.probe_interval"); haInterval > 0 {
 		if haInterval < 2*time.Second {
 			v.Add(&ConfigError{
@@ -812,8 +832,11 @@ func validateServerConfigInto(v *configValidator) {
 			})
 		}
 	}
+}
 
-	// Validate tuning parameters
+// validateTuningConfig
+// records ConfigErrors for non-positive node store tuning values.
+func validateTuningConfig(v *configValidator) {
 	if size := viper.GetInt("tuning.node_store_batch_size"); size <= 0 {
 		v.Add(&ConfigError{
 			Reason:  "tuning.node_store_batch_size must be positive",
@@ -829,12 +852,6 @@ func validateServerConfigInto(v *configValidator) {
 			Hint:    "set to a positive duration (default: 500ms)",
 		})
 	}
-
-	validateDERPConfig(v)
-	validateDatabaseConfig(v)
-	validateMagicDNSConfig(v)
-
-	depr.Apply(v)
 }
 
 // validateDERPConfig records ConfigErrors when the embedded DERP server
