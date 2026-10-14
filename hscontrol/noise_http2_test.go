@@ -104,13 +104,26 @@ func TestServeNoiseHTTP2ClosesSilentClient(t *testing.T) {
 		})
 	}()
 
-	// Client preface and SETTINGS, then silence: the client never reads,
-	// so it never answers the PING.
+	// Client preface and SETTINGS, then read and acknowledge the server's
+	// frames but never answer its PING.
 	_, err := clientConn.Write([]byte(http2.ClientPreface))
 	require.NoError(t, err)
 
+	framer := http2.NewFramer(clientConn, clientConn)
+	require.NoError(t, framer.WriteSettings())
+
 	go func() {
-		_ = http2.NewFramer(clientConn, nil).WriteSettings()
+		for {
+			frame, err := framer.ReadFrame()
+			if err != nil {
+				return
+			}
+
+			settings, ok := frame.(*http2.SettingsFrame)
+			if ok && !settings.IsAck() {
+				_ = framer.WriteSettingsAck()
+			}
+		}
 	}()
 
 	select {
