@@ -751,8 +751,8 @@ func validateNoiseConfig(v *configValidator) {
 	}
 
 	noisePingKeys := []struct{ key, validHint, negativeHint string }{
-		{"noise.ping_after_idle", "use a Go duration such as 30s or 1m, or 0 to disable the check", "set a positive duration, or 0 to disable the check"},
-		{"noise.ping_timeout", "use a Go duration such as 20s or 1m, at least " + minNoisePingTimeout.String(), "set a positive duration of at least " + minNoisePingTimeout.String()},
+		{"noise.ping_after_idle", "use a Go duration such as 30s or 1m, at least " + minNoisePingAfterIdle.String() + ", or 0 to disable the check", "set a duration of at least " + minNoisePingAfterIdle.String() + ", or 0 to disable the check"},
+		{"noise.ping_timeout", "use a Go duration such as 20s or 1m, at least " + minNoisePingTimeout.String(), "set a duration of at least " + minNoisePingTimeout.String()},
 	}
 
 	for _, pk := range noisePingKeys {
