@@ -297,7 +297,6 @@ jobs:
           - TestResolveMagicDNS
           - TestResolveMagicDNSExtraRecordsPath
           - TestNodeClaimedHostnames
-          - TestServiceVIPs
           - TestDERPServerScenario
           - TestDERPServerWebsocketScenario
           - TestPingAllByIP
@@ -340,6 +339,7 @@ jobs:
           - TestHASubnetRouterFailoverDockerDisconnect
           - TestHeadscale
           - TestTailscaleNodesJoiningHeadcale
+          - TestServiceVIPs
           - TestSSHOneUserToAll
           - TestSSHMultipleUsersAllToAll
           - TestSSHNoSSHConfigured
