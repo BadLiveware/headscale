@@ -706,8 +706,7 @@ func validateServerConfigInto(v *configValidator) {
 	depr.Apply(v)
 }
 
-// validateTLSConfig
-// records ConfigErrors for conflicting or unsupported TLS settings.
+// validateTLSConfig records ConfigErrors for conflicting or unsupported TLS settings.
 func validateTLSConfig(v *configValidator) {
 	if (viper.GetString("tls_letsencrypt_hostname") != "") &&
 		((viper.GetString("tls_cert_path") != "") || (viper.GetString("tls_key_path") != "")) {
@@ -741,8 +740,7 @@ func validateTLSConfig(v *configValidator) {
 	}
 }
 
-// validateNoiseConfig
-// records ConfigErrors for the Noise key path and the Noise connection health check.
+// validateNoiseConfig records ConfigErrors for the Noise key path and the Noise connection health check.
 func validateNoiseConfig(v *configValidator) {
 	if viper.GetString("noise.private_key_path") == "" {
 		v.Add(&ConfigError{
@@ -798,8 +796,7 @@ func validateNoiseConfig(v *configValidator) {
 	}
 }
 
-// validateHAProbeConfig
-// records ConfigErrors for the HA route health probing intervals.
+// validateHAProbeConfig records ConfigErrors for the HA route health probing intervals.
 func validateHAProbeConfig(v *configValidator) {
 	if haInterval := viper.GetDuration("node.routes.ha.probe_interval"); haInterval > 0 {
 		if haInterval < 2*time.Second {
@@ -834,8 +831,7 @@ func validateHAProbeConfig(v *configValidator) {
 	}
 }
 
-// validateTuningConfig
-// records ConfigErrors for non-positive node store tuning values.
+// validateTuningConfig records ConfigErrors for non-positive node store tuning values.
 func validateTuningConfig(v *configValidator) {
 	if size := viper.GetInt("tuning.node_store_batch_size"); size <= 0 {
 		v.Add(&ConfigError{
