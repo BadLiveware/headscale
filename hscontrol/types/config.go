@@ -750,7 +750,14 @@ func validateNoiseConfig(v *configValidator) {
 		})
 	}
 
-	for _, k := range []string{"noise.ping_after_idle", "noise.ping_timeout"} {
+	noisePingKeys := []struct{ key, validHint string }{
+		{"noise.ping_after_idle", "use a Go duration such as 30s or 1m, or 0 to disable the check"},
+		{"noise.ping_timeout", "use a Go duration such as 20s or 1m, at least " + minNoisePingTimeout.String()},
+	}
+
+	for _, pk := range noisePingKeys {
+		k, validHint := pk.key, pk.validHint
+
 		// viper.GetDuration reads a malformed duration as 0, which would
 		// silently disable the check.
 		if raw, ok := viper.Get(k).(string); ok {
@@ -759,7 +766,7 @@ func validateNoiseConfig(v *configValidator) {
 				v.Add(&ConfigError{
 					Reason:  k + " is not a valid duration",
 					Current: []KV{{k, raw}},
-					Hint:    "use a Go duration such as 30s or 1m, or 0 to disable the check",
+					Hint:    validHint,
 				})
 
 				continue
@@ -770,7 +777,7 @@ func validateNoiseConfig(v *configValidator) {
 			v.Add(&ConfigError{
 				Reason:  k + " must not be negative",
 				Current: []KV{{k, d.String()}},
-				Hint:    "set a positive duration, or noise.ping_after_idle: 0 to disable the check",
+				Hint:    "set a positive duration",
 			})
 		}
 	}
