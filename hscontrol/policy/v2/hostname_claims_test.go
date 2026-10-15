@@ -151,7 +151,13 @@ func TestServiceHostnames(t *testing.T) {
 		{
 			name:     "malformed-service-names-are-ignored",
 			node:     tagged("tag:gateway"),
-			services: []string{"gitea", "svc:", "svc:a_b", "svc:GITEA"},
+			services: []string{"gitea", "svc:", "svc:a_b"},
+			want:     nil,
+		},
+		{
+			name:     "service-label-is-lowercased",
+			node:     tagged("tag:gateway"),
+			services: []string{"svc:GITEA"},
 			want:     []string{"gitea.gw.mgmt.example.com"},
 		},
 		{

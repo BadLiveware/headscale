@@ -54,6 +54,8 @@ type servicesFetch struct {
 	nodeID types.NodeID
 	hash   string
 	timer  *time.Timer
+
+	deadline time.Time
 }
 
 // fetchBackoff tracks the failed fetches of one node for one hash.
@@ -83,6 +85,8 @@ type fetchBackoff struct {
 type servicesFetcher struct {
 	h *Headscale
 
+	now func() time.Time
+
 	mu      sync.Mutex
 	closed  bool
 	byID    map[string]*servicesFetch
@@ -98,6 +102,7 @@ type servicesFetcher struct {
 func newServicesFetcher(h *Headscale) *servicesFetcher {
 	return &servicesFetcher{
 		h:       h,
+		now:     time.Now,
 		byID:    make(map[string]*servicesFetch),
 		pending: make(map[types.NodeID]string),
 		backoff: make(map[types.NodeID]*fetchBackoff),
@@ -186,6 +191,10 @@ func (f *servicesFetcher) cancelLocked(nodeID types.NodeID) {
 func (f *servicesFetcher) sync(nodeID types.NodeID) {
 	node, ok := f.h.state.GetNodeByID(nodeID)
 	if !ok {
+		f.mu.Lock()
+		f.cancelLocked(nodeID)
+		f.mu.Unlock()
+
 		return
 	}
 
@@ -225,7 +234,7 @@ func (f *servicesFetcher) sync(nodeID types.NodeID) {
 	}
 
 	if b, ok := f.backoff[nodeID]; ok {
-		if b.hash == want && time.Now().Before(b.retryAt) {
+		if b.hash == want && f.now().Before(b.retryAt) {
 			f.mu.Unlock()
 
 			return
@@ -252,7 +261,7 @@ func (f *servicesFetcher) sync(nodeID types.NodeID) {
 	}
 
 	id := rands.HexString(servicesFetchIDLength)
-	fetch := &servicesFetch{nodeID: nodeID, hash: want}
+	fetch := &servicesFetch{nodeID: nodeID, hash: want, deadline: f.now().Add(servicesFetchTimeout)}
 	fetch.timer = time.AfterFunc(servicesFetchTimeout, func() { f.expire(id) })
 	f.byID[id] = fetch
 	f.pending[nodeID] = id
@@ -301,24 +310,23 @@ func (f *servicesFetcher) callbackURL(id string) string {
 	return "https://" + host + c2nResponsePath + "?id=" + id
 }
 
-// lookup returns the pending fetch with the given ID.
-func (f *servicesFetcher) lookup(id string) (*servicesFetch, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	fetch, ok := f.byID[id]
-
-	return fetch, ok
-}
-
-// take removes and returns the fetch with the given ID.
-func (f *servicesFetcher) take(id string) (*servicesFetch, bool) {
+// takeFrom removes and returns the fetch with the given ID when machineKey
+// is the key of the node it was sent to. The check and the removal happen
+// under one lock, so a timeout cannot slip between them and reject an
+// answer that arrived in time, and a post from another machine cannot
+// consume the fetch.
+func (f *servicesFetcher) takeFrom(id string, machineKey key.MachinePublic) (*servicesFetch, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	fetch, ok := f.byID[id]
 	if !ok {
-		return nil, false
+		return nil, errUnknownC2NRequest
+	}
+
+	node, ok := f.h.state.GetNodeByID(fetch.nodeID)
+	if !ok || node.MachineKey() != machineKey {
+		return nil, errC2NWrongMachine
 	}
 
 	fetch.timer.Stop()
@@ -328,17 +336,40 @@ func (f *servicesFetcher) take(id string) (*servicesFetch, bool) {
 		delete(f.pending, fetch.nodeID)
 	}
 
-	return fetch, true
+	return fetch, nil
 }
 
 // expire handles a fetch that got no answer in time. A fetch can be lost
 // when the node reconnects, or when another ping to the node is merged into
 // the same map response.
+//
+// The decision happens under the lock against the stored deadline: a timer
+// that fires before the deadline leaves the fetch pending and waits for the
+// rest, and an answer that takes the fetch first wins.
 func (f *servicesFetcher) expire(id string) {
-	fetch, ok := f.take(id)
+	f.mu.Lock()
+
+	fetch, ok := f.byID[id]
 	if !ok {
+		f.mu.Unlock()
+
 		return
 	}
+
+	if remaining := fetch.deadline.Sub(f.now()); remaining > 0 {
+		fetch.timer.Reset(remaining)
+		f.mu.Unlock()
+
+		return
+	}
+
+	delete(f.byID, id)
+
+	if f.pending[fetch.nodeID] == id {
+		delete(f.pending, fetch.nodeID)
+	}
+
+	f.mu.Unlock()
 
 	f.failed(fetch, "no answer")
 }
@@ -367,7 +398,7 @@ func (f *servicesFetcher) failed(fetch *servicesFetch, reason string) {
 
 	delay := retryDelay(b.failures)
 	b.failures++
-	b.retryAt = time.Now().Add(delay)
+	b.retryAt = f.now().Add(delay)
 
 	if b.retry != nil {
 		b.retry.Stop()
@@ -405,21 +436,9 @@ func retryDelay(failures int) time.Duration {
 
 // complete handles a node's c2n response for the fetch with the given ID.
 func (f *servicesFetcher) complete(id string, machineKey key.MachinePublic, body *bufio.Reader) error {
-	pending, ok := f.lookup(id)
-	if !ok {
-		return errUnknownC2NRequest
-	}
-
-	// Check the sender before taking the fetch, so a post from another
-	// machine cannot cancel it.
-	node, ok := f.h.state.GetNodeByID(pending.nodeID)
-	if !ok || node.MachineKey() != machineKey {
-		return errC2NWrongMachine
-	}
-
-	fetch, ok := f.take(id)
-	if !ok {
-		return errUnknownC2NRequest
+	fetch, err := f.takeFrom(id, machineKey)
+	if err != nil {
+		return err
 	}
 
 	active, err := parseVIPServicesResponse(body)

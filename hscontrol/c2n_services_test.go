@@ -77,6 +77,16 @@ func vipServicesBody(services ...string) *bufio.Reader {
 	return bufio.NewReader(strings.NewReader(resp))
 }
 
+// pending reports whether the fixture's fetch is still pending.
+func (fx *c2nFixture) pending() bool {
+	fx.f.mu.Lock()
+	defer fx.f.mu.Unlock()
+
+	_, ok := fx.f.byID[fx.id]
+
+	return ok
+}
+
 func (fx *c2nFixture) stored(t *testing.T) (string, []string) {
 	t.Helper()
 
@@ -95,7 +105,7 @@ func TestServicesFetchWrongMachineKeepsFetch(t *testing.T) {
 	err := fx.f.complete(fx.id, key.NewMachine().Public(), vipServicesBody("svc:grafana"))
 	require.ErrorIs(t, err, errC2NWrongMachine)
 
-	_, stillPending := fx.f.lookup(fx.id)
+	stillPending := fx.pending()
 	assert.True(t, stillPending, "a refused response must not consume the fetch")
 
 	hash, services := fx.stored(t)
@@ -151,7 +161,7 @@ func TestServicesFetchDrainCancelsPendingFetch(t *testing.T) {
 
 	fx.f.sync(fx.nodeID)
 
-	_, stillPending := fx.f.lookup(fx.id)
+	stillPending := fx.pending()
 	assert.False(t, stillPending, "draining must cancel the pending fetch")
 
 	err := fx.f.complete(fx.id, fx.node.MachineKey(), vipServicesBody("svc:grafana"))
@@ -159,4 +169,85 @@ func TestServicesFetchDrainCancelsPendingFetch(t *testing.T) {
 
 	_, services := fx.stored(t)
 	assert.Empty(t, services)
+}
+
+// A node that is gone must not leave a retry in the backoff map: nothing
+// else would ever clear it.
+func TestServicesFetchSyncForMissingNodeClearsState(t *testing.T) {
+	fx := newC2NFixture(t, fetchedHash)
+
+	const goneID = types.NodeID(987654)
+
+	fx.f.mu.Lock()
+	fx.f.backoff[goneID] = &fetchBackoff{hash: fetchedHash, failures: 1, retry: time.AfterFunc(time.Hour, func() {})}
+	fx.f.pending[goneID] = "gone-fetch"
+	fx.f.byID["gone-fetch"] = &servicesFetch{nodeID: goneID, hash: fetchedHash, timer: time.AfterFunc(time.Hour, func() {})}
+	fx.f.mu.Unlock()
+
+	fx.f.sync(goneID)
+
+	fx.f.mu.Lock()
+	defer fx.f.mu.Unlock()
+
+	assert.NotContains(t, fx.f.backoff, goneID)
+	assert.NotContains(t, fx.f.pending, goneID)
+	assert.NotContains(t, fx.f.byID, "gone-fetch")
+}
+
+// A timer that fires before the stored deadline must not consume the fetch,
+// so the answer that arrives before the deadline still counts and the
+// node's services stay. Once the deadline has passed, the fetch expires.
+func TestServicesFetchEarlyTimerKeepsFetchUntilDeadline(t *testing.T) {
+	fx := newC2NFixture(t, fetchedHash)
+
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	fx.f.now = func() time.Time { return clock }
+
+	fx.f.mu.Lock()
+	fx.f.byID[fx.id].deadline = clock.Add(servicesFetchTimeout)
+	fx.f.mu.Unlock()
+
+	clock = clock.Add(servicesFetchTimeout - time.Second)
+	fx.f.expire(fx.id)
+
+	stillPending := fx.pending()
+	require.True(t, stillPending, "an early timer must not consume the fetch")
+
+	fx.f.mu.Lock()
+	_, backedOff := fx.f.backoff[fx.nodeID]
+	fx.f.mu.Unlock()
+	assert.False(t, backedOff, "an early timer must not schedule a retry")
+
+	err := fx.f.complete(fx.id, fx.node.MachineKey(), vipServicesBody("svc:grafana"))
+	require.NoError(t, err)
+
+	hash, services := fx.stored(t)
+	assert.Equal(t, fetchedHash, hash)
+	assert.Equal(t, []string{"svc:grafana"}, services)
+}
+
+func TestServicesFetchTimerAtDeadlineExpiresFetch(t *testing.T) {
+	fx := newC2NFixture(t, fetchedHash)
+
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	fx.f.now = func() time.Time { return clock }
+
+	fx.f.mu.Lock()
+	fx.f.byID[fx.id].deadline = clock.Add(servicesFetchTimeout)
+	fx.f.mu.Unlock()
+
+	clock = clock.Add(servicesFetchTimeout)
+	fx.f.expire(fx.id)
+
+	stillPending := fx.pending()
+	assert.False(t, stillPending)
+
+	err := fx.f.complete(fx.id, fx.node.MachineKey(), vipServicesBody("svc:grafana"))
+	require.ErrorIs(t, err, errUnknownC2NRequest)
+
+	fx.f.mu.Lock()
+	b, ok := fx.f.backoff[fx.nodeID]
+	fx.f.mu.Unlock()
+	require.True(t, ok)
+	assert.Equal(t, 1, b.failures)
 }
