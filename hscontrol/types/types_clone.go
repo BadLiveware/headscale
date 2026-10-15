@@ -77,37 +77,40 @@ func (src *Node) Clone() *Node {
 	if dst.IsOnline != nil {
 		dst.IsOnline = new(*src.IsOnline)
 	}
+	dst.AdvertisedServices = append(src.AdvertisedServices[:0:0], src.AdvertisedServices...)
 	return dst
 }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _NodeCloneNeedsRegeneration = Node(struct {
-	ID             NodeID
-	MachineKey     key.MachinePublic
-	NodeKey        key.NodePublic
-	DiscoKey       key.DiscoPublic
-	Endpoints      AddrPorts
-	Hostinfo       *tailcfg.Hostinfo
-	IPv4           *netip.Addr
-	IPv6           *netip.Addr
-	Hostname       string
-	GivenName      string
-	UserID         *uint
-	User           *User
-	RegisterMethod string
-	Tags           Strings
-	AuthKeyID      *uint64
-	AuthKey        *Credential
-	Expiry         *time.Time
-	LastSeen       *time.Time
-	ApprovedRoutes Prefixes
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	DeletedAt      *time.Time
-	IsOnline       *bool
-	Unhealthy      bool
-	ActiveSessions int
-	SessionEpoch   uint64
+	ID                     NodeID
+	MachineKey             key.MachinePublic
+	NodeKey                key.NodePublic
+	DiscoKey               key.DiscoPublic
+	Endpoints              AddrPorts
+	Hostinfo               *tailcfg.Hostinfo
+	IPv4                   *netip.Addr
+	IPv6                   *netip.Addr
+	Hostname               string
+	GivenName              string
+	UserID                 *uint
+	User                   *User
+	RegisterMethod         string
+	Tags                   Strings
+	AuthKeyID              *uint64
+	AuthKey                *Credential
+	Expiry                 *time.Time
+	LastSeen               *time.Time
+	ApprovedRoutes         Prefixes
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	DeletedAt              *time.Time
+	IsOnline               *bool
+	Unhealthy              bool
+	ActiveSessions         int
+	SessionEpoch           uint64
+	AdvertisedServices     []string
+	AdvertisedServicesHash string
 }{})
 
 // Clone makes a deep copy of PreAuthKey.

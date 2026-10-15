@@ -1059,6 +1059,8 @@ func parseAlias(vs string) (Alias, error) {
 		return new(Tag(vs)), nil
 	case isAutoGroup(vs):
 		return new(AutoGroup(vs)), nil
+	case isService(vs):
+		return new(Service(vs)), nil
 	}
 
 	if isHost(vs) {
@@ -1500,12 +1502,13 @@ func (to TagOwners) Contains(tagOwner *Tag) error {
 type AutoApproverPolicy struct {
 	Routes   map[netip.Prefix]AutoApprovers `json:"routes,omitempty"`
 	ExitNode AutoApprovers                  `json:"exitNode,omitempty"`
+	Services ServiceApprovers               `json:"services,omitempty"`
 }
 
 // MarshalJSON marshals the AutoApproverPolicy to JSON.
 func (ap AutoApproverPolicy) MarshalJSON() ([]byte, error) {
 	// Marshal empty policies as empty object
-	if ap.Routes == nil && ap.ExitNode == nil {
+	if ap.Routes == nil && ap.ExitNode == nil && ap.Services == nil {
 		return []byte("{}"), nil
 	}
 
@@ -1960,6 +1963,15 @@ type Policy struct {
 	Tests               []PolicyTest       `json:"tests,omitempty"`
 	SSHTests            []SSHPolicyTest    `json:"sshTests,omitempty"`
 	RandomizeClientPort bool               `json:"randomizeClientPort,omitempty"`
+	HostnameClaims      HostnameClaims     `json:"hostnameClaims,omitempty"`
+
+	// hostnameClaimRules is [Policy.HostnameClaims] compiled by validate.
+	hostnameClaimRules []hostnameClaimRule
+
+	// serviceVIPs are the virtual IP addresses of the services in
+	// [AutoApproverPolicy.Services]. The server allocates and stores them;
+	// the [PolicyManager] sets them before each compile.
+	serviceVIPs map[tailcfg.ServiceName][]netip.Addr
 }
 
 // MarshalJSON is deliberately not implemented for [Policy].
@@ -2765,6 +2777,12 @@ func (p *Policy) validate() error {
 			}
 		}
 	}
+
+	errs = append(errs, p.validateServices()...)
+
+	rules, claimErrs := p.compileHostnameClaims()
+	errs = append(errs, claimErrs...)
+	p.hostnameClaimRules = rules
 
 	if err := validateTests(p, p.Tests); err != nil { //nolint:noinlineerr
 		errs = append(errs, err)

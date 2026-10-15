@@ -281,36 +281,50 @@ func (v NodeView) ActiveSessions() int { return v.ж.ActiveSessions }
 // returned by Connect as a "Connect ran" sentinel for its cleanup,
 // and Disconnect logs it. Runtime-only.
 func (v NodeView) SessionEpoch() uint64 { return v.ж.SessionEpoch }
-func (v NodeView) String() string       { return v.ж.String() }
+
+// AdvertisedServices are the service names (`svc:<label>`) the
+// client reports as active through the c2n `/vip-services`
+// endpoint, which it fills from its AdvertiseServices preference.
+// AdvertisedServicesHash is the [tailcfg.Hostinfo.ServicesHash]
+// that list belongs to; a Hostinfo with a different hash means the
+// list is stale and must be fetched again. Runtime-only: a client
+// reports its hash on every connect, so a restart refetches.
+func (v NodeView) AdvertisedServices() views.Slice[string] {
+	return views.SliceOf(v.ж.AdvertisedServices)
+}
+func (v NodeView) AdvertisedServicesHash() string { return v.ж.AdvertisedServicesHash }
+func (v NodeView) String() string                 { return v.ж.String() }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _NodeViewNeedsRegeneration = Node(struct {
-	ID             NodeID
-	MachineKey     key.MachinePublic
-	NodeKey        key.NodePublic
-	DiscoKey       key.DiscoPublic
-	Endpoints      AddrPorts
-	Hostinfo       *tailcfg.Hostinfo
-	IPv4           *netip.Addr
-	IPv6           *netip.Addr
-	Hostname       string
-	GivenName      string
-	UserID         *uint
-	User           *User
-	RegisterMethod string
-	Tags           Strings
-	AuthKeyID      *uint64
-	AuthKey        *Credential
-	Expiry         *time.Time
-	LastSeen       *time.Time
-	ApprovedRoutes Prefixes
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	DeletedAt      *time.Time
-	IsOnline       *bool
-	Unhealthy      bool
-	ActiveSessions int
-	SessionEpoch   uint64
+	ID                     NodeID
+	MachineKey             key.MachinePublic
+	NodeKey                key.NodePublic
+	DiscoKey               key.DiscoPublic
+	Endpoints              AddrPorts
+	Hostinfo               *tailcfg.Hostinfo
+	IPv4                   *netip.Addr
+	IPv6                   *netip.Addr
+	Hostname               string
+	GivenName              string
+	UserID                 *uint
+	User                   *User
+	RegisterMethod         string
+	Tags                   Strings
+	AuthKeyID              *uint64
+	AuthKey                *Credential
+	Expiry                 *time.Time
+	LastSeen               *time.Time
+	ApprovedRoutes         Prefixes
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	DeletedAt              *time.Time
+	IsOnline               *bool
+	Unhealthy              bool
+	ActiveSessions         int
+	SessionEpoch           uint64
+	AdvertisedServices     []string
+	AdvertisedServicesHash string
 }{})
 
 // View returns a read-only view of PreAuthKey.

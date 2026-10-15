@@ -17,6 +17,19 @@ import (
 // to this function. Use [policy.PolicyManager.FilterForNode] instead, which handles
 // both cases.
 func ReduceFilterRules(node types.NodeView, rules []tailcfg.FilterRule) []tailcfg.FilterRule {
+	return ReduceFilterRulesWithServices(node, rules, nil)
+}
+
+// ReduceFilterRulesWithServices is [ReduceFilterRules] for a node that may
+// host services: rules whose destinations overlap serviceVIPs, the
+// single-address prefixes of the service virtual IPs, are kept too. The
+// client accepts packets to those VIPs when control lists them in its
+// `service-host` capability.
+func ReduceFilterRulesWithServices(
+	node types.NodeView,
+	rules []tailcfg.FilterRule,
+	serviceVIPs []netip.Prefix,
+) []tailcfg.FilterRule {
 	ret := []tailcfg.FilterRule{}
 	subnetRoutes := node.SubnetRoutes()
 	exitRoutes := node.ExitRoutes()
@@ -25,7 +38,7 @@ func ReduceFilterRules(node types.NodeView, rules []tailcfg.FilterRule) []tailcf
 		// Handle CapGrant rules separately — they use CapGrant[].Dsts
 		// instead of DstPorts for destination matching.
 		if len(rule.CapGrant) > 0 {
-			reduced := reduceCapGrantRule(node, rule)
+			reduced := reduceCapGrantRule(node, rule, serviceVIPs)
 			if reduced != nil {
 				ret = append(ret, *reduced)
 			}
@@ -64,6 +77,11 @@ func ReduceFilterRules(node types.NodeView, rules []tailcfg.FilterRule) []tailcf
 			// exit node every rule, not only internet ones.
 			if slices.ContainsFunc(exitRoutes, expanded.OverlapsPrefix) {
 				dests = append(dests, dest)
+				continue
+			}
+
+			if slices.ContainsFunc(serviceVIPs, expanded.OverlapsPrefix) {
+				dests = append(dests, dest)
 			}
 		}
 
@@ -87,10 +105,15 @@ func ReduceFilterRules(node types.NodeView, rules []tailcfg.FilterRule) []tailcf
 func reduceCapGrantRule(
 	node types.NodeView,
 	rule tailcfg.FilterRule,
+	serviceVIPs []netip.Prefix,
 ) *tailcfg.FilterRule {
 	var capGrants []tailcfg.CapGrant
 
 	nodeIPs := node.IPs()
+	for _, vip := range serviceVIPs {
+		nodeIPs = append(nodeIPs, vip.Addr())
+	}
+
 	subnetRoutes := node.SubnetRoutes()
 
 	for _, cg := range rule.CapGrant {
