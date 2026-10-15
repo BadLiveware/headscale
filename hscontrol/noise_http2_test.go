@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -93,34 +94,57 @@ func TestServeNoiseHTTP2ClosesSilentClient(t *testing.T) {
 
 	serverConn, clientConn := net.Pipe()
 
-	served := make(chan struct{})
+	go serveNoiseHTTP2(serverConn, http.NotFoundHandler(), types.NoiseConfig{
+		PingAfterIdle: 100 * time.Millisecond,
+		PingTimeout:   100 * time.Millisecond,
+	})
 
-	go func() {
-		defer close(served)
-
-		serveNoiseHTTP2(serverConn, http.NotFoundHandler(), types.NoiseConfig{
-			PingAfterIdle: 100 * time.Millisecond,
-			PingTimeout:   100 * time.Millisecond,
-		})
-	}()
-
-	// Client preface and SETTINGS, then silence: the client never reads,
-	// so it never answers the PING.
+	// Client preface and SETTINGS, then read and acknowledge the server's
+	// frames but never answer its PING.
 	_, err := clientConn.Write([]byte(http2.ClientPreface))
 	require.NoError(t, err)
 
+	framer := http2.NewFramer(clientConn, clientConn)
+	require.NoError(t, framer.WriteSettings())
+
+	var sawPing atomic.Bool
+
+	closed := make(chan struct{})
+
 	go func() {
-		_ = http2.NewFramer(clientConn, nil).WriteSettings()
+		defer close(closed)
+
+		for {
+			frame, err := framer.ReadFrame()
+			if err != nil {
+				return
+			}
+
+			switch f := frame.(type) {
+			case *http2.SettingsFrame:
+				if !f.IsAck() {
+					_ = framer.WriteSettingsAck()
+				}
+			case *http2.PingFrame:
+				if !f.IsAck() {
+					sawPing.Store(true)
+				}
+			}
+		}
 	}()
 
 	select {
-	case <-served:
+	case <-closed:
 	case <-time.After(10 * time.Second):
 		t.Fatal("server did not close the silent connection")
 	}
 
-	assert.Contains(t, logs.String(), `"level":"warn"`)
-	assert.Contains(t, logs.String(), `"component":"noise-http2"`)
-	assert.Contains(t, logs.String(), "timeout waiting for PING response")
-	assert.InDelta(t, lostBefore+1, lostPingCloses(t), 0)
+	assert.True(t, sawPing.Load(), "server sent a PING before closing")
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Contains(c, logs.String(), `"level":"warn"`)
+		assert.Contains(c, logs.String(), `"component":"noise-http2"`)
+		assert.Contains(c, logs.String(), "timeout waiting for PING response")
+		assert.InDelta(c, lostBefore+1, lostPingCloses(t), 0)
+	}, 5*time.Second, 10*time.Millisecond)
 }

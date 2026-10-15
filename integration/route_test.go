@@ -4295,7 +4295,7 @@ func TestHASubnetRouterFailoverBothOfflineCablePull(t *testing.T) {
 //     4c. r2 up   → r2 primary again, traffic resumes.
 //  5. Simultaneous dual failure.
 //     5a. r1 + r2 down → primary must NOT flap to offline r1.
-//     5b. both up → primary stays r2, traffic resumes.
+//     5b. both up → a router is primary again, traffic resumes.
 //
 // The no-flap assertions in 4b and 5a are the regression barriers
 // for #3203. Phases 2/3 are functional checks (failover works,
@@ -4420,9 +4420,11 @@ func TestHASubnetRouterFailoverDockerDisconnect(t *testing.T) {
 		}, propagationTime, 1*time.Second, msg)
 	}
 
-	// requirePrimaryStable asserts primary == want for the entire
-	// window. Catches transient flaps and verifies anti-flap on
-	// prev-primary return.
+	// requirePrimaryStable asserts the primary is never a node other
+	// than want for the entire window. Headscale marks a node whose
+	// cable is pulled offline within about a minute, and a prefix with
+	// no online advertiser has no primary, so an unmapped prefix is
+	// allowed. Catches flaps to an offline node.
 	requirePrimaryStable := func(want types.NodeID, window time.Duration, msg string) {
 		t.Helper()
 		require.Never(t, func() bool {
@@ -4433,8 +4435,19 @@ func TestHASubnetRouterFailoverDockerDisconnect(t *testing.T) {
 
 			owner, ok := pr.PrimaryRoutes[pref.String()]
 
-			return !ok || owner != want
+			return ok && owner != want
 		}, window, 1*time.Second, msg)
+	}
+
+	// requireAnyPrimary blocks until headscale reports one of the two
+	// routers as the primary advertiser for pref.
+	requireAnyPrimary := func(msg string) {
+		t.Helper()
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			pr, err := headscale.PrimaryRoutes()
+			assert.NoError(c, err)
+			assert.Contains(c, []types.NodeID{nodeID1, nodeID2}, pr.PrimaryRoutes[pref.String()], msg)
+		}, propagationTime, 1*time.Second, msg)
 	}
 
 	// ============================================================
@@ -4536,7 +4549,9 @@ func TestHASubnetRouterFailoverDockerDisconnect(t *testing.T) {
 
 	// ============================================================
 	// Phase 5: simultaneous dual failure (whole-segment outage).
-	// prev going in is r2 — primary must not flap to offline r1.
+	// prev going in is r2 — primary must not flap to offline r1. Once
+	// both routers are marked offline no primary exists, so on return
+	// either router may be elected.
 	// ============================================================
 	t.Log("=== Phase 5a: cable-pull r1 and r2 simultaneously. ===")
 	require.NoError(t, subRouter1.DisconnectFromNetwork(usernet1),
@@ -4546,11 +4561,11 @@ func TestHASubnetRouterFailoverDockerDisconnect(t *testing.T) {
 	requirePrimaryStable(nodeID2, flapWindow,
 		"phase 5a: primary must not flap to offline r1 (issue #3203)")
 
-	t.Log("=== Phase 5b: reconnect both, r2 should remain primary. ===")
+	t.Log("=== Phase 5b: reconnect both, a router should be primary again. ===")
 	require.NoError(t, subRouter1.ReconnectToNetwork(usernet1),
 		"phase 5b: docker reconnect r1")
 	require.NoError(t, subRouter2.ReconnectToNetwork(usernet1),
 		"phase 5b: docker reconnect r2")
-	requirePrimary(nodeID2, "phase 5b: r2 primary after both reconnect")
-	requireTrafficWorks("phase 5b: client reaches webservice via r2")
+	requireAnyPrimary("phase 5b: a router is primary after both reconnect")
+	requireTrafficWorks("phase 5b: client reaches webservice after both reconnect")
 }
