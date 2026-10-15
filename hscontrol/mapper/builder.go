@@ -174,7 +174,15 @@ func (b *MapResponseBuilder) WithDNSConfig() *MapResponseBuilder {
 		return b
 	}
 
-	b.resp.DNSConfig = generateDNSConfig(b.mapper.cfg, node, b.mapper.state.NodeCapMap(node.ID()))
+	dnsConfig := generateDNSConfig(b.mapper.cfg, node, b.mapper.state.NodeCapMap(node.ID()))
+	if dnsConfig != nil {
+		dnsConfig.ExtraRecords = append(
+			dnsConfig.ExtraRecords,
+			b.mapper.state.HostnameClaimRecords(node.ID())...,
+		)
+	}
+
+	b.resp.DNSConfig = dnsConfig
 
 	return b
 }
