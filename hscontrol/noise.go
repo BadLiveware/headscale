@@ -22,9 +22,9 @@ import (
 	"github.com/juanfont/headscale/hscontrol/util/zlog/zf"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"golang.org/x/net/http2"
 	"tailscale.com/control/controlbase"
 	"tailscale.com/control/controlhttp/controlhttpserver"
+	"tailscale.com/net/netutil"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )
@@ -209,24 +209,23 @@ func (h *Headscale) NoiseUpgradeHandler(
 	serveNoiseHTTP2(noiseConn, r, h.cfg.Noise)
 }
 
-// serveNoiseHTTP2 serves HTTP/2 on an accepted Noise connection until it
-// closes, with the PING health check of cfg, and with the server's messages
-// and error counts going to Headscale's logger and metrics.
+// serveNoiseHTTP2 starts serving HTTP/2 on an accepted Noise connection, with
+// the PING health check of cfg, and with the server's messages and error
+// counts going to Headscale's logger and metrics. It returns before the
+// connection closes.
 func serveNoiseHTTP2(conn net.Conn, handler http.Handler, cfg types.NoiseConfig) {
-	base := &http.Server{
+	srv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: types.HTTPTimeout,
+		Protocols:         new(http.Protocols),
 		HTTP2:             noiseHTTP2Config(cfg),
 		ErrorLog:          noiseHTTP2ErrorLog,
 	}
+	// Noise already encrypts, so HTTP/2 runs without TLS.
+	srv.Protocols.SetUnencryptedHTTP2(true)
 
-	h2 := &http2.Server{
-		CountError: func(errType string) {
-			noiseHTTP2Errors.WithLabelValues(errType).Inc()
-		},
-	}
-
-	h2.ServeConn(conn, &http2.ServeConnOpts{BaseConfig: base})
+	// Serve returns once the listener is drained; the connection outlives it.
+	_ = srv.Serve(netutil.NewOneConnListener(conn, nil))
 }
 
 // noiseHTTP2ErrorLog sends the messages of the HTTP/2 server on Noise
@@ -255,18 +254,21 @@ func (w zerologWarnWriter) Write(p []byte) (int, error) {
 // minutes, and the node stays online. A PING after cfg.PingAfterIdle
 // without reading anything, answered within cfg.PingTimeout or the
 // connection is closed, finds such a node. A healthy client answers PING
-// frames in its HTTP/2 transport, idle or not.
-//
-// [http2.Server.ServeConn] applies these settings from the base server.
+// frames in its HTTP/2 transport, idle or not. The settings also count the
+// server's HTTP/2 errors in the metrics.
 func noiseHTTP2Config(cfg types.NoiseConfig) *http.HTTP2Config {
-	if cfg.PingAfterIdle <= 0 {
-		return nil
+	h2 := &http.HTTP2Config{
+		CountError: func(errType string) {
+			noiseHTTP2Errors.WithLabelValues(errType).Inc()
+		},
 	}
 
-	return &http.HTTP2Config{
-		SendPingTimeout: cfg.PingAfterIdle,
-		PingTimeout:     cfg.PingTimeout,
+	if cfg.PingAfterIdle > 0 {
+		h2.SendPingTimeout = cfg.PingAfterIdle
+		h2.PingTimeout = cfg.PingTimeout
 	}
+
+	return h2
 }
 
 func unsupportedClientError(version tailcfg.CapabilityVersion) error {
