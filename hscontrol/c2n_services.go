@@ -54,6 +54,8 @@ type servicesFetch struct {
 	nodeID types.NodeID
 	hash   string
 	timer  *time.Timer
+
+	deadline time.Time
 }
 
 // fetchBackoff tracks the failed fetches of one node for one hash.
@@ -83,6 +85,8 @@ type fetchBackoff struct {
 type servicesFetcher struct {
 	h *Headscale
 
+	now func() time.Time
+
 	mu      sync.Mutex
 	closed  bool
 	byID    map[string]*servicesFetch
@@ -98,6 +102,7 @@ type servicesFetcher struct {
 func newServicesFetcher(h *Headscale) *servicesFetcher {
 	return &servicesFetcher{
 		h:       h,
+		now:     time.Now,
 		byID:    make(map[string]*servicesFetch),
 		pending: make(map[types.NodeID]string),
 		backoff: make(map[types.NodeID]*fetchBackoff),
@@ -186,6 +191,10 @@ func (f *servicesFetcher) cancelLocked(nodeID types.NodeID) {
 func (f *servicesFetcher) sync(nodeID types.NodeID) {
 	node, ok := f.h.state.GetNodeByID(nodeID)
 	if !ok {
+		f.mu.Lock()
+		f.cancelLocked(nodeID)
+		f.mu.Unlock()
+
 		return
 	}
 
@@ -224,7 +233,7 @@ func (f *servicesFetcher) sync(nodeID types.NodeID) {
 	}
 
 	if b, ok := f.backoff[nodeID]; ok {
-		if b.hash == want && time.Now().Before(b.retryAt) {
+		if b.hash == want && f.now().Before(b.retryAt) {
 			f.mu.Unlock()
 
 			return
@@ -251,7 +260,7 @@ func (f *servicesFetcher) sync(nodeID types.NodeID) {
 	}
 
 	id := rands.HexString(servicesFetchIDLength)
-	fetch := &servicesFetch{nodeID: nodeID, hash: want}
+	fetch := &servicesFetch{nodeID: nodeID, hash: want, deadline: f.now().Add(servicesFetchTimeout)}
 	fetch.timer = time.AfterFunc(servicesFetchTimeout, func() { f.expire(id) })
 	f.byID[id] = fetch
 	f.pending[nodeID] = id
@@ -329,34 +338,37 @@ func (f *servicesFetcher) takeFrom(id string, machineKey key.MachinePublic) (*se
 	return fetch, nil
 }
 
-// take removes and returns the fetch with the given ID.
-func (f *servicesFetcher) take(id string) (*servicesFetch, bool) {
+// expire handles a fetch that got no answer in time. A fetch can be lost
+// when the node reconnects, or when another ping to the node is merged into
+// the same map response.
+//
+// The decision happens under the lock against the stored deadline: a timer
+// that fires before the deadline leaves the fetch pending and waits for the
+// rest, and an answer that takes the fetch first wins.
+func (f *servicesFetcher) expire(id string) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 
 	fetch, ok := f.byID[id]
 	if !ok {
-		return nil, false
+		f.mu.Unlock()
+
+		return
 	}
 
-	fetch.timer.Stop()
+	if remaining := fetch.deadline.Sub(f.now()); remaining > 0 {
+		fetch.timer.Reset(remaining)
+		f.mu.Unlock()
+
+		return
+	}
+
 	delete(f.byID, id)
 
 	if f.pending[fetch.nodeID] == id {
 		delete(f.pending, fetch.nodeID)
 	}
 
-	return fetch, true
-}
-
-// expire handles a fetch that got no answer in time. A fetch can be lost
-// when the node reconnects, or when another ping to the node is merged into
-// the same map response.
-func (f *servicesFetcher) expire(id string) {
-	fetch, ok := f.take(id)
-	if !ok {
-		return
-	}
+	f.mu.Unlock()
 
 	f.failed(fetch, "no answer")
 }
@@ -385,7 +397,7 @@ func (f *servicesFetcher) failed(fetch *servicesFetch, reason string) {
 
 	delay := retryDelay(b.failures)
 	b.failures++
-	b.retryAt = time.Now().Add(delay)
+	b.retryAt = f.now().Add(delay)
 
 	if b.retry != nil {
 		b.retry.Stop()
