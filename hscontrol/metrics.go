@@ -38,4 +38,10 @@ var (
 		Name:      "mapresponse_ended_total",
 		Help:      "total count of new mapsessions ended",
 	}, []string{"reason"})
+	noiseHTTP2Errors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: prometheusNamespace,
+		Name:      "noise_http2_errors_total",
+		Help: "total count of HTTP/2 errors on Noise connections, by type; " +
+			"conn_close_lost_ping counts connections closed because a node did not answer a PING",
+	}, []string{"type"})
 )

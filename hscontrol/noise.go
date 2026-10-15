@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	stdlog "log"
+	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -16,6 +19,7 @@ import (
 	"github.com/go-chi/metrics"
 	"github.com/juanfont/headscale/hscontrol/capver"
 	"github.com/juanfont/headscale/hscontrol/types"
+	"github.com/juanfont/headscale/hscontrol/util/zlog/zf"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"tailscale.com/control/controlbase"
@@ -202,16 +206,69 @@ func (h *Headscale) NoiseUpgradeHandler(
 		r.Post("/c2n", ns.NotImplementedHandler)
 	})
 
+	serveNoiseHTTP2(noiseConn, r, h.cfg.Noise)
+}
+
+// serveNoiseHTTP2 starts serving HTTP/2 on an accepted Noise connection, with
+// the PING health check of cfg, and with the server's messages and error
+// counts going to Headscale's logger and metrics. It returns before the
+// connection closes.
+func serveNoiseHTTP2(conn net.Conn, handler http.Handler, cfg types.NoiseConfig) {
 	srv := &http.Server{
-		Handler:           r,
+		Handler:           handler,
 		ReadHeaderTimeout: types.HTTPTimeout,
 		Protocols:         new(http.Protocols),
+		HTTP2:             noiseHTTP2Config(cfg),
+		ErrorLog:          noiseHTTP2ErrorLog,
 	}
 	// Noise already encrypts, so HTTP/2 runs without TLS.
 	srv.Protocols.SetUnencryptedHTTP2(true)
 
 	// Serve returns once the listener is drained; the connection outlives it.
-	_ = srv.Serve(netutil.NewOneConnListener(noiseConn, nil))
+	_ = srv.Serve(netutil.NewOneConnListener(conn, nil))
+}
+
+// noiseHTTP2ErrorLog sends the messages of the HTTP/2 server on Noise
+// connections, such as "timeout waiting for PING response" when it closes a
+// connection whose node stopped answering, to Headscale's logger instead of
+// the standard library's default logger. The server only writes errors
+// there, so they are warnings: an operator who logs at warn still sees a
+// node found lost.
+var noiseHTTP2ErrorLog = stdlog.New(zerologWarnWriter{component: "noise-http2"}, "", 0)
+
+// zerologWarnWriter writes each line it gets as a warning.
+type zerologWarnWriter struct {
+	component string
+}
+
+func (w zerologWarnWriter) Write(p []byte) (int, error) {
+	log.Warn().Str(zf.Component, w.component).Msg(strings.TrimSpace(string(p)))
+
+	return len(p), nil
+}
+
+// noiseHTTP2Config returns the HTTP/2 settings of a Noise connection. A
+// node keeps one map request open on it for as long as it is online, and
+// the connection carries few frames from the node. When the network path
+// is cut without a close, nothing fails until TCP gives up, which takes
+// minutes, and the node stays online. A PING after cfg.PingAfterIdle
+// without reading anything, answered within cfg.PingTimeout or the
+// connection is closed, finds such a node. A healthy client answers PING
+// frames in its HTTP/2 transport, idle or not. The settings also count the
+// server's HTTP/2 errors in the metrics.
+func noiseHTTP2Config(cfg types.NoiseConfig) *http.HTTP2Config {
+	h2 := &http.HTTP2Config{
+		CountError: func(errType string) {
+			noiseHTTP2Errors.WithLabelValues(errType).Inc()
+		},
+	}
+
+	if cfg.PingAfterIdle > 0 {
+		h2.SendPingTimeout = cfg.PingAfterIdle
+		h2.PingTimeout = cfg.PingTimeout
+	}
+
+	return h2
 }
 
 func unsupportedClientError(version tailcfg.CapabilityVersion) error {

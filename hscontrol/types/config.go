@@ -29,6 +29,11 @@ const (
 	PKCEMethodS256  string = "S256"
 
 	defaultNodeStoreBatchSize = 100
+
+	// minNoisePingAfterIdle keeps the Noise PING check from waking idle
+	// clients, often phones on battery, more often than every few seconds.
+	minNoisePingAfterIdle = 5 * time.Second
+	minNoisePingTimeout   = 1 * time.Second
 )
 
 var (
@@ -63,6 +68,19 @@ type EphemeralConfig struct {
 	// InactivityTimeout is how long an ephemeral node can be offline
 	// before it is automatically deleted.
 	InactivityTimeout time.Duration
+}
+
+// NoiseConfig contains the health check settings of the Noise (ts2021)
+// control connection that every node keeps open.
+type NoiseConfig struct {
+	// PingAfterIdle is how long Headscale waits without reading anything
+	// from a node's connection before it sends an HTTP/2 PING frame.
+	// Zero disables the check.
+	PingAfterIdle time.Duration
+
+	// PingTimeout is how long Headscale waits for the answer to a PING
+	// before it closes the connection; the node then goes offline.
+	PingTimeout time.Duration
 }
 
 // HARouteConfig contains configuration for HA subnet router health probing.
@@ -117,6 +135,7 @@ type Config struct {
 	PrefixV6            *netip.Prefix
 	IPAllocation        IPAllocationStrategy
 	NoisePrivateKeyPath string
+	Noise               NoiseConfig
 	BaseDomain          string
 	Log                 LogConfig
 	DisableUpdateCheck  bool
@@ -484,6 +503,9 @@ func LoadConfig(path string, isFile bool) error {
 	viper.SetDefault("node.expiry", "0")
 	viper.SetDefault("node.ephemeral.inactivity_timeout", "120s")
 	viper.SetDefault("preauth_keys.revoked_retention", "168h")
+	viper.SetDefault("noise.ping_after_idle", "30s")
+	viper.SetDefault("noise.ping_timeout", "20s")
+
 	viper.SetDefault("node.routes.ha.probe_interval", "10s")
 	viper.SetDefault("node.routes.ha.probe_timeout", "5s")
 
@@ -634,46 +656,9 @@ func validateServerConfigInto(v *configValidator) {
 		})
 	}
 
-	if (viper.GetString("tls_letsencrypt_hostname") != "") &&
-		((viper.GetString("tls_cert_path") != "") || (viper.GetString("tls_key_path") != "")) {
-		v.Add(&ConfigError{
-			Reason:  "tls_letsencrypt_hostname and tls_cert_path/tls_key_path are mutually exclusive",
-			Current: []KV{{"tls_letsencrypt_hostname", viper.GetString("tls_letsencrypt_hostname")}},
-			ConflictsWith: []KV{
-				{"tls_cert_path", viper.GetString("tls_cert_path")},
-				{"tls_key_path", viper.GetString("tls_key_path")},
-			},
-			Hint: "choose one TLS strategy and unset the other (Let's Encrypt OR a static keypair)",
-			See:  "https://headscale.net/stable/ref/tls/",
-		})
-	}
-
-	if viper.GetString("noise.private_key_path") == "" {
-		v.Add(&ConfigError{
-			Reason: "noise.private_key_path is required",
-			Hint:   "set noise.private_key_path: /var/lib/headscale/noise_private.key (or any writable path)",
-			See:    "https://headscale.net/stable/setup/install/official/",
-		})
-	}
-
-	if (viper.GetString("tls_letsencrypt_hostname") != "") &&
-		(viper.GetString("tls_letsencrypt_challenge_type") == TLSALPN01ChallengeType) &&
-		(!strings.HasSuffix(viper.GetString("listen_addr"), ":443")) {
-		// this is only a warning because there could be something sitting in front of headscale that redirects the traffic (e.g. an iptables rule)
-		log.Warn().
-			Msg("Warning: when using tls_letsencrypt_hostname with TLS-ALPN-01 as challenge type, headscale must be reachable on port 443, i.e. listen_addr should probably end in :443")
-	}
-
+	validateTLSConfig(v)
+	validateNoiseConfig(v)
 	validateListenerCollisions(v)
-
-	if ct := viper.GetString("tls_letsencrypt_challenge_type"); ct != HTTP01ChallengeType && ct != TLSALPN01ChallengeType {
-		v.Add(&ConfigError{
-			Reason:  "tls_letsencrypt_challenge_type has an unsupported value",
-			Current: []KV{{"tls_letsencrypt_challenge_type", ct}},
-			Allowed: []string{HTTP01ChallengeType, TLSALPN01ChallengeType},
-			Hint:    "pick one of the allowed values; HTTP-01 is the default",
-		})
-	}
 
 	serverURL := viper.GetString("server_url")
 	if !strings.HasPrefix(serverURL, "http://") && !strings.HasPrefix(serverURL, "https://") {
@@ -712,7 +697,114 @@ func validateServerConfigInto(v *configValidator) {
 		}
 	}
 
-	// Validate HA health probing parameters
+	validateHAProbeConfig(v)
+	validateTuningConfig(v)
+	validateDERPConfig(v)
+	validateDatabaseConfig(v)
+	validateMagicDNSConfig(v)
+
+	depr.Apply(v)
+}
+
+// validateTLSConfig records ConfigErrors for conflicting or unsupported TLS settings.
+func validateTLSConfig(v *configValidator) {
+	if (viper.GetString("tls_letsencrypt_hostname") != "") &&
+		((viper.GetString("tls_cert_path") != "") || (viper.GetString("tls_key_path") != "")) {
+		v.Add(&ConfigError{
+			Reason:  "tls_letsencrypt_hostname and tls_cert_path/tls_key_path are mutually exclusive",
+			Current: []KV{{"tls_letsencrypt_hostname", viper.GetString("tls_letsencrypt_hostname")}},
+			ConflictsWith: []KV{
+				{"tls_cert_path", viper.GetString("tls_cert_path")},
+				{"tls_key_path", viper.GetString("tls_key_path")},
+			},
+			Hint: "choose one TLS strategy and unset the other (Let's Encrypt OR a static keypair)",
+			See:  "https://headscale.net/stable/ref/tls/",
+		})
+	}
+
+	if (viper.GetString("tls_letsencrypt_hostname") != "") &&
+		(viper.GetString("tls_letsencrypt_challenge_type") == TLSALPN01ChallengeType) &&
+		(!strings.HasSuffix(viper.GetString("listen_addr"), ":443")) {
+		// this is only a warning because there could be something sitting in front of headscale that redirects the traffic (e.g. an iptables rule)
+		log.Warn().
+			Msg("Warning: when using tls_letsencrypt_hostname with TLS-ALPN-01 as challenge type, headscale must be reachable on port 443, i.e. listen_addr should probably end in :443")
+	}
+
+	if ct := viper.GetString("tls_letsencrypt_challenge_type"); ct != HTTP01ChallengeType && ct != TLSALPN01ChallengeType {
+		v.Add(&ConfigError{
+			Reason:  "tls_letsencrypt_challenge_type has an unsupported value",
+			Current: []KV{{"tls_letsencrypt_challenge_type", ct}},
+			Allowed: []string{HTTP01ChallengeType, TLSALPN01ChallengeType},
+			Hint:    "pick one of the allowed values; HTTP-01 is the default",
+		})
+	}
+}
+
+// validateNoiseConfig records ConfigErrors for the Noise key path and the Noise connection health check.
+func validateNoiseConfig(v *configValidator) {
+	if viper.GetString("noise.private_key_path") == "" {
+		v.Add(&ConfigError{
+			Reason: "noise.private_key_path is required",
+			Hint:   "set noise.private_key_path: /var/lib/headscale/noise_private.key (or any writable path)",
+			See:    "https://headscale.net/stable/setup/install/official/",
+		})
+	}
+
+	noisePingKeys := []struct{ key, validHint, negativeHint string }{
+		{"noise.ping_after_idle", "use a Go duration such as 30s or 1m, at least " + minNoisePingAfterIdle.String() + ", or 0 to disable the check", "set a duration of at least " + minNoisePingAfterIdle.String() + ", or 0 to disable the check"},
+		{"noise.ping_timeout", "use a Go duration such as 20s or 1m, at least " + minNoisePingTimeout.String(), "set a duration of at least " + minNoisePingTimeout.String()},
+	}
+
+	for _, pk := range noisePingKeys {
+		k, validHint, negativeHint := pk.key, pk.validHint, pk.negativeHint
+
+		// viper.GetDuration reads a malformed duration as 0, which would
+		// silently disable the check.
+		if raw, ok := viper.Get(k).(string); ok {
+			_, err := time.ParseDuration(raw)
+			if err != nil {
+				v.Add(&ConfigError{
+					Reason:  k + " is not a valid duration",
+					Current: []KV{{k, raw}},
+					Hint:    validHint,
+				})
+
+				continue
+			}
+		}
+
+		if d := viper.GetDuration(k); d < 0 {
+			v.Add(&ConfigError{
+				Reason:  k + " must not be negative",
+				Current: []KV{{k, d.String()}},
+				Hint:    negativeHint,
+			})
+		}
+	}
+
+	if idle := viper.GetDuration("noise.ping_after_idle"); idle > 0 {
+		if idle < minNoisePingAfterIdle {
+			v.Add(&ConfigError{
+				Reason:  "noise.ping_after_idle is below the minimum",
+				Current: []KV{{"noise.ping_after_idle", idle.String()}},
+				Minimum: minNoisePingAfterIdle.String(),
+				Hint:    "raise the value to at least the minimum, or set 0 to disable the check",
+			})
+		}
+
+		if timeout := viper.GetDuration("noise.ping_timeout"); timeout < minNoisePingTimeout {
+			v.Add(&ConfigError{
+				Reason:  "noise.ping_timeout is below the minimum",
+				Current: []KV{{"noise.ping_timeout", timeout.String()}},
+				Minimum: minNoisePingTimeout.String(),
+				Hint:    "raise the value to at least the minimum",
+			})
+		}
+	}
+}
+
+// validateHAProbeConfig records ConfigErrors for the HA route health probing intervals.
+func validateHAProbeConfig(v *configValidator) {
 	if haInterval := viper.GetDuration("node.routes.ha.probe_interval"); haInterval > 0 {
 		if haInterval < 2*time.Second {
 			v.Add(&ConfigError{
@@ -744,8 +836,10 @@ func validateServerConfigInto(v *configValidator) {
 			})
 		}
 	}
+}
 
-	// Validate tuning parameters
+// validateTuningConfig records ConfigErrors for non-positive node store tuning values.
+func validateTuningConfig(v *configValidator) {
 	if size := viper.GetInt("tuning.node_store_batch_size"); size <= 0 {
 		v.Add(&ConfigError{
 			Reason:  "tuning.node_store_batch_size must be positive",
@@ -761,12 +855,6 @@ func validateServerConfigInto(v *configValidator) {
 			Hint:    "set to a positive duration (default: 500ms)",
 		})
 	}
-
-	validateDERPConfig(v)
-	validateDatabaseConfig(v)
-	validateMagicDNSConfig(v)
-
-	depr.Apply(v)
 }
 
 // validateDERPConfig records ConfigErrors when the embedded DERP server
@@ -1410,6 +1498,10 @@ func LoadServerConfig() (*Config, error) {
 		NoisePrivateKeyPath: util.AbsolutePathFromConfigPath(
 			viper.GetString("noise.private_key_path"),
 		),
+		Noise: NoiseConfig{
+			PingAfterIdle: viper.GetDuration("noise.ping_after_idle"),
+			PingTimeout:   viper.GetDuration("noise.ping_timeout"),
+		},
 		BaseDomain: dnsConfig.BaseDomain,
 
 		DERP: derpConfig,
