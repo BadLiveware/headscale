@@ -143,3 +143,17 @@ func TestOrderClaimRecordsForViewer(t *testing.T) {
 		}
 	}
 }
+
+func TestWarnNewlyShadowedWarnsOncePerName(t *testing.T) {
+	var warned []string
+
+	warn := func(name string) { warned = append(warned, name) }
+
+	set := warnNewlyShadowed([]string{"a.headscale.net", "a.headscale.net", "b.headscale.net"}, nil, warn)
+	assert.Equal(t, []string{"a.headscale.net", "b.headscale.net"}, warned)
+
+	warned = nil
+	set = warnNewlyShadowed([]string{"a.headscale.net", "a.headscale.net", "c.headscale.net"}, set, warn)
+	assert.Equal(t, []string{"c.headscale.net"}, warned)
+	assert.Len(t, set, 2)
+}

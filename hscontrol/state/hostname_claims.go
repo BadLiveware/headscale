@@ -116,6 +116,28 @@ func deriveClaimRecords(
 	return records, shadowed
 }
 
+// warnNewlyShadowed calls warn once for each name in shadowed that is not in
+// warned, however often the name repeats, and returns the set of names that
+// shadow now. A name that no longer shadows leaves the set, so the set stays
+// as small as the current claims.
+func warnNewlyShadowed(shadowed []string, warned map[string]struct{}, warn func(name string)) map[string]struct{} {
+	now := make(map[string]struct{}, len(shadowed))
+
+	for _, name := range shadowed {
+		if _, seen := now[name]; seen {
+			continue
+		}
+
+		now[name] = struct{}{}
+
+		if _, done := warned[name]; !done {
+			warn(name)
+		}
+	}
+
+	return now
+}
+
 // refreshHostnameClaims derives the claimed-hostname records from the
 // current nodes and policy. It returns a DNS change when they differ from
 // the previous result, and an empty change otherwise.
@@ -141,23 +163,12 @@ func (s *State) refreshHostnameClaims() change.Change {
 	claimed, shadowed := deriveClaimRecords(nodes, s.polMan.ServiceHostnames, s.cfg.BaseDomain)
 	next := s.withServiceRecords(claimed, nodes)
 
-	// Warn once per shadowing name while it shadows; forget names that no
-	// longer do, so the set stays as small as the current claims.
-	warned := make(map[string]struct{}, len(shadowed))
-	for _, name := range shadowed {
-		warned[name] = struct{}{}
-
-		if _, done := s.claims.warned[name]; done {
-			continue
-		}
-
+	s.claims.warned = warnNewlyShadowed(shadowed, s.claims.warned, func(name string) {
 		log.Warn().
 			Str("hostname", name).
 			Str("base_domain", s.cfg.BaseDomain).
 			Msg("ignoring claimed hostname directly below the MagicDNS base domain; use a zone outside it or a subzone")
-	}
-
-	s.claims.warned = warned
+	})
 
 	if len(next) > 0 {
 		s.claims.inUse.Store(true)
